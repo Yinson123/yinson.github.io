@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>goroutine分析 &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>goroutine分析</h1>
+  <time datetime=2020-07-05T18:30:23&#43;0800 class="post-date">Sun, Jul 5, 2020</time>
+  <h3 id="goroutine介绍">Goroutine介绍</h3>
+<p>​		相比于其他语言，golang最为大家熟知的点是它强大的协程并发能力。以&quot;轻量级&quot;主打的协程，轻易就能达到十几万的并发数量。goroutine是Go中最基本的执行单元，每个go程序启动时，都会创建一个主goroutine。</p>
+<p>​		 协程被称为微线程或者用户态轻量级线程，协程调度不需要内核参与而是完全由用户态程序来决定，因此协程对于系统而言是无感知的。协程由用户态控制就不存在抢占式调度那样强制的CPU控制权切换到其他进线程，多个协程进行协作式调度，协程自己主动把控制权转让出去之后，其他协程才能被执行到，这样就避免了系统切换开销提高了CPU的使用效率</p>
+<p>​		那在开发的过程中，是不是就可以不注意协程数量，随心所欲地起协程来处理逻辑呢？</p>
+<p>​		为了分析这个问题，我们不妨来执行一段代码：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span> () {   
+	<span style="color:#a6e22e">number</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">math</span>.<span style="color:#a6e22e">MaxInt64</span>   
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#a6e22e">number</span>; <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {      
+		<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">i</span> <span style="color:#66d9ef">int</span>) {         
+			<span style="color:#75715e">// 做一些业务逻辑处理         
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;go func: %d\n&#34;</span>, <span style="color:#a6e22e">i</span>)         
+			<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)      
+		}(<span style="color:#a6e22e">i</span>)   
+	}
+}
+</code></pre></div><p>很快就出现了堆栈溢出的情况：</p>
+<p>![](../../img/批注 2020-07-08 231435.png)</p>
+<p>如果<code>number</code>是程序执行中起的goroutine数量，服务器资源会很快被耗尽，并导致程序最终被killed。</p>
+<h3 id="通过协程池解决goroutine数量问题">通过协程池解决goroutine数量问题</h3>
+<p>​		有过开发经验的小伙伴对于线程池一定不会陌生。线程池一般被用来解决频繁创建和销毁线程的场景中，为避免产生资源碎片，大家会使用线程池。对应的，协程也具有协程池。</p>
+<p>​		对于开头的问题，很容易想到的解决方法就是通过协程池控制协程的数量。目前github上已经有成熟的开源项目<a href="https://github.com/panjf2000/ants">ants</a>实现了对大规模Goroutine的调度管理，复用。</p>
+<p>​		不过也有人认为，goroutine作为轻量级的线程诞生的初衷就是为了解决线程高占用资源的问题，而通过创建goroutine池来解决问题，就显得本末倒置。</p>
+<h3 id="通过channel和sync方式解决goroutine数量问题">通过channel和sync方式解决goroutine数量问题</h3>
+<p>​		Go提供了一个很好的协程同步机制，channel。可以通过它发送或者接收值，值的类型可以在定义channel时指定。同时Go也提供了一个等待任务完成的阻塞器sync.WaitGroup。WaitGroup 对象内部有一个计数器，最初从0开始，它有三个方法：Add(), Done(), Wait() 用来控制计数器的数量。例如下面这段代码中，就利用了channel和sync的方式，控制goroutine并发数量。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">package main
+
+import (
+  &#34;fmt&#34;
+  &#34;sync&#34;
+  &#34;time&#34;
+)
+
+type Glimit struct {
+  n int
+  c chan struct{}
+}
+
+// initialization Glimit struct
+func New(n int) *Glimit {
+  return &amp;Glimit{
+    n: n,
+    c: make(chan struct{}, n),
+  }
+}
+// Run f in a new goroutine but with limit.
+func (g *Glimit) Run(f func()) {
+  g.c &lt;- struct{}{}
+  go func() {
+    f()
+    &lt;-g.c
+  }()
+}
+
+var wg = sync.WaitGroup{}
+
+func main() {
+  number := 10
+  g := New(2)
+  for i := 0; i &lt; number; i++ {
+    wg.Add(1)
+    value :=i
+    goFunc := func() {
+      // 做一些业务逻辑处理
+      fmt.Printf(&#34;go func: %d\n&#34;, value)
+      time.Sleep(time.Second)
+      wg.Done()
+    }
+    g.Run(goFunc)
+  }
+  wg.Wait()
+}
+</code></pre></div><p>代码中对象<code>g</code>的channel缓存设置为2，当channel中有数据未被读取，且数据量等于2时，其余<code>Run</code>方法都将被阻塞在往<code>g.c</code>写数据，导致协程一直未被启用。而<code>wg</code>在这里的作用，就是利用<code>wg.wait</code>的能力，在所有协程未被执行完之前，主进程不会退出。否则，当主程序执行完成后，未执行的协程也会直接被终止。</p>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>
