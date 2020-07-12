@@ -64,7 +64,7 @@
   <p>​		在<a href="https://yinson123.github.io/post/gorouting/">goroutine分析</a>中提到goroutine调度管理项目<a href="https://github.com/panjf2000/ants">ants</a>，本篇就从源码角度来分析一下协程池的管理实现，其中ants代码基于commitID<code>b26661997</code>。</p>
 <h3 id="结构分析">结构分析</h3>
 <p>​		ants的代码结构很简单，可以分成三部分。</p>
-<pre><code>├─examples
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-shell" data-lang="shell">├─examples
 |   └─main.go
 └─internal
 │   └─spinlock.go
@@ -81,7 +81,7 @@
 ├─worker_loop_queue_test.go
 ├─worker_stack.go
 └─worker_stack_test.go
-</code></pre><p>​		最外层放的都是最主要的实现逻辑部分，还包括关键逻辑的单元测试和性能测试文件。<code>examples</code>中给了一个使用样例，<code>internal</code>中实现了一个自旋锁。</p>
+</code></pre></div><p>​		最外层放的都是最主要的实现逻辑部分，还包括关键逻辑的单元测试和性能测试文件。<code>examples</code>中给了一个使用样例，<code>internal</code>中实现了一个自旋锁。</p>
 <div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">spinLock</span> <span style="color:#66d9ef">uint32</span>
 
 <span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">sl</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">spinLock</span>) <span style="color:#a6e22e">Lock</span>() {   
