@@ -8,7 +8,7 @@
   
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-  <title> &middot; 静夜思</title>
+  <title>ants源码走读 &middot; 静夜思</title>
   <meta name="description" content="" />
 
   
@@ -59,9 +59,231 @@
 
     <main class="content container">
     <div class="post">
-  <h1></h1>
-  <time datetime=0001-01-01T00:00:00Z class="post-date">Mon, Jan 1, 0001</time>
-  
+  <h1>ants源码走读</h1>
+  <time datetime=2020-07-11T19:30:23&#43;0800 class="post-date">Sat, Jul 11, 2020</time>
+  <p>​		在<a href="https://yinson123.github.io/post/gorouting/">goroutine分析</a>中提到goroutine调度管理项目<a href="https://github.com/panjf2000/ants">ants</a>，本篇就从源码角度来分析一下协程池的管理实现，其中ants代码基于commitID<code>b26661997</code>。</p>
+<h3 id="结构分析">结构分析</h3>
+<p>​		ants的代码结构很简单，可以分成三部分。</p>
+<pre><code>├─examples
+|   └─main.go
+└─internal
+│   └─spinlock.go
+├─ants.go
+├─ants_brnchmark_test.go
+├─ants_test.go
+├─options.go
+├─pool.go
+├─pool_func.go
+├─worker.go
+├─worker_array.go
+├─worker_func.go
+├─worker_loop_queue.go
+├─worker_loop_queue_test.go
+├─worker_stack.go
+└─worker_stack_test.go
+</code></pre><p>​		最外层放的都是最主要的实现逻辑部分，还包括关键逻辑的单元测试和性能测试文件。<code>examples</code>中给了一个使用样例，<code>internal</code>中实现了一个自旋锁。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">spinLock</span> <span style="color:#66d9ef">uint32</span>
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">sl</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">spinLock</span>) <span style="color:#a6e22e">Lock</span>() {   
+	<span style="color:#66d9ef">for</span> !<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapUint32</span>((<span style="color:#f92672">*</span><span style="color:#66d9ef">uint32</span>)(<span style="color:#a6e22e">sl</span>), <span style="color:#ae81ff">0</span>, <span style="color:#ae81ff">1</span>) {      					<span style="color:#a6e22e">runtime</span>.<span style="color:#a6e22e">Gosched</span>()   
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">sl</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">spinLock</span>) <span style="color:#a6e22e">Unlock</span>() {
+	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StoreUint32</span>((<span style="color:#f92672">*</span><span style="color:#66d9ef">uint32</span>)(<span style="color:#a6e22e">sl</span>), <span style="color:#ae81ff">0</span>)
+}
+
+<span style="color:#75715e">// NewSpinLock instantiates a spin-lock.
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewSpinLock</span>() <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Locker</span> {   
+		<span style="color:#66d9ef">return</span> new(<span style="color:#a6e22e">spinLock</span>)
+}
+</code></pre></div><p>​		可以看到<code>spinLock</code>主要实现了两个方法:<code>Lock</code>和<code>Unlock</code>。<code>Lock</code>最主要的是<strong>CAS算法</strong><code>atomic.CompareAndSwapUint32</code>。当<code>sl</code>的值不为0的时候，一直执行<code>runtime.Gosched</code>方法，让当前协程一直让出时间片给别的协程，以此达到自旋锁的功能。需要注意的是，该自旋锁不支持重入， 即当一个线程第一次已经获取到了该锁，在锁释放之前又一次重新获取该锁，第二次就不能成功获取到。由于不满足CAS，所以第二次获取会进入while循环等待，而如果是可重入锁，第二次也是应该能够成功获取到的。</p>
+<p>​		若要实现可重入锁，我们可以通过引入计数器，来记录获取锁的线程数。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">spinLock</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">owner</span> <span style="color:#66d9ef">int</span>
+	<span style="color:#a6e22e">count</span> <span style="color:#66d9ef">int</span>
+	<span style="color:#a6e22e">value</span> <span style="color:#66d9ef">uint32</span>
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">sl</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">spinLock</span>) <span style="color:#a6e22e">Lock</span>() {
+        <span style="color:#a6e22e">me</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">GetGoroutineId</span>()
+        <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">owner</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">me</span> { <span style="color:#75715e">// 如果当前线程已经获取到了锁，线程数增加一，然后返回
+</span><span style="color:#75715e"></span>               <span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">count</span><span style="color:#f92672">++</span>
+               <span style="color:#66d9ef">return</span>
+        }
+        <span style="color:#75715e">// 如果没获取到锁，则通过CAS自旋
+</span><span style="color:#75715e"></span>    <span style="color:#66d9ef">for</span> !<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapUint32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">value</span>, <span style="color:#ae81ff">0</span>, <span style="color:#ae81ff">1</span>) {
+        <span style="color:#a6e22e">runtime</span>.<span style="color:#a6e22e">Gosched</span>()
+    }
+}
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">sl</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">spinLock</span>) <span style="color:#a6e22e">Unlock</span>() {
+      <span style="color:#66d9ef">if</span>  <span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">owner</span> <span style="color:#f92672">!=</span> <span style="color:#a6e22e">GetGoroutineId</span>() {
+          panic(<span style="color:#e6db74">&#34;illegalMonitorStateError&#34;</span>)
+      }
+      <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">count</span> &gt;<span style="color:#ae81ff">0</span>  { <span style="color:#75715e">// 如果大于0，表示当前线程多次获取了该锁，释放锁通过count减一来模拟
+</span><span style="color:#75715e"></span>           <span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">count</span><span style="color:#f92672">--</span>
+      } <span style="color:#66d9ef">else</span> { <span style="color:#75715e">// 如果count==0，可以将锁释放，这样就能保证获取锁的次数与释放锁的次数是一致的了。
+</span><span style="color:#75715e"></span>           <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StoreUint32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">sl</span>.<span style="color:#a6e22e">value</span>, <span style="color:#ae81ff">0</span>)
+       }
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">GetGoroutineId</span>() <span style="color:#66d9ef">int</span> {
+    <span style="color:#66d9ef">defer</span> <span style="color:#66d9ef">func</span>()  {
+        <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> recover(); <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+            <span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;panic recover:panic info:%v\n&#34;</span>, <span style="color:#a6e22e">err</span>)     
+        }
+    }()
+
+    <span style="color:#66d9ef">var</span> <span style="color:#a6e22e">buf</span> [<span style="color:#ae81ff">64</span>]<span style="color:#66d9ef">byte</span>
+    <span style="color:#a6e22e">n</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">runtime</span>.<span style="color:#a6e22e">Stack</span>(<span style="color:#a6e22e">buf</span>[:], <span style="color:#66d9ef">false</span>)
+    <span style="color:#a6e22e">idField</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">strings</span>.<span style="color:#a6e22e">Fields</span>(<span style="color:#a6e22e">strings</span>.<span style="color:#a6e22e">TrimPrefix</span>(string(<span style="color:#a6e22e">buf</span>[:<span style="color:#a6e22e">n</span>]), <span style="color:#e6db74">&#34;goroutine &#34;</span>))[<span style="color:#ae81ff">0</span>]
+    <span style="color:#a6e22e">id</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">strconv</span>.<span style="color:#a6e22e">Atoi</span>(<span style="color:#a6e22e">idField</span>)
+    <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+        panic(<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Sprintf</span>(<span style="color:#e6db74">&#34;cannot get goroutine id: %v&#34;</span>, <span style="color:#a6e22e">err</span>))
+    }
+    <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">id</span>
+}
+
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewSpinLock</span>() <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Locker</span> {
+	<span style="color:#66d9ef">return</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">spinLock</span>{<span style="color:#a6e22e">owner</span>: <span style="color:#a6e22e">GetGoroutineId</span>(), <span style="color:#a6e22e">value</span>: uint32(<span style="color:#ae81ff">0</span>), <span style="color:#a6e22e">count</span>: <span style="color:#ae81ff">0</span>}
+}
+</code></pre></div><h3 id="源码分析">源码分析</h3>
+<p>​		我们通过项目中给的example，来了解ants的调用逻辑。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">var</span> <span style="color:#a6e22e">sum</span> <span style="color:#66d9ef">int32</span>
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">myFunc</span>(<span style="color:#a6e22e">i</span> <span style="color:#66d9ef">interface</span>{}) {
+	<span style="color:#a6e22e">n</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">i</span>.(<span style="color:#66d9ef">int32</span>)
+	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">sum</span>, <span style="color:#a6e22e">n</span>)
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;run with %d\n&#34;</span>, <span style="color:#a6e22e">n</span>)
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">demoFunc</span>() {
+	<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#ae81ff">10</span> <span style="color:#f92672">*</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Millisecond</span>)
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;Hello World!&#34;</span>)
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">ants</span>.<span style="color:#a6e22e">Release</span>()
+
+	<span style="color:#a6e22e">runTimes</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">1000</span>
+
+	<span style="color:#75715e">// Use the common pool.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">wg</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>
+	<span style="color:#a6e22e">syncCalculateSum</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>() {
+		<span style="color:#a6e22e">demoFunc</span>()
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+	}
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#a6e22e">runTimes</span>; <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">1</span>)
+		<span style="color:#a6e22e">_</span> = <span style="color:#a6e22e">ants</span>.<span style="color:#a6e22e">Submit</span>(<span style="color:#a6e22e">syncCalculateSum</span>)
+	}
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;running goroutines: %d\n&#34;</span>, <span style="color:#a6e22e">ants</span>.<span style="color:#a6e22e">Running</span>())
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;finish all tasks.\n&#34;</span>)
+
+	<span style="color:#75715e">// Use the pool with a method,
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// set 10 to the capacity of goroutine pool and 1 second for expired duration.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">p</span>, <span style="color:#a6e22e">_</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">ants</span>.<span style="color:#a6e22e">NewPoolWithFunc</span>(<span style="color:#ae81ff">10</span>, <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">i</span> <span style="color:#66d9ef">interface</span>{}) {
+		<span style="color:#a6e22e">myFunc</span>(<span style="color:#a6e22e">i</span>)
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+	})
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">Release</span>()
+	<span style="color:#75715e">// Submit tasks one by one.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#a6e22e">runTimes</span>; <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">1</span>)
+		<span style="color:#a6e22e">_</span> = <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">Invoke</span>(int32(<span style="color:#a6e22e">i</span>))
+	}
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;running goroutines: %d\n&#34;</span>, <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">Running</span>())
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;finish all tasks, result is %d\n&#34;</span>, <span style="color:#a6e22e">sum</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">sum</span> <span style="color:#f92672">!=</span> <span style="color:#ae81ff">499500</span> {
+		panic(<span style="color:#e6db74">&#34;the final result is wrong!!!&#34;</span>)
+	}
+}
+</code></pre></div><p>​		从主函数中可以看到，其实这里作者给了两种通过协程池调度goroutine的方法，分别是通过<code>ants.Submit</code>调用的<code>defaultAntsPool</code>和通过<code>NewPoolWithFunc</code>起的协程池实例，并通过对应的<code>Invoke</code>方法传入参数启动协程执行对应逻辑。对比两种方法的实现，我们可以看到后者可以通过传参控制协程池中最大的协程数量；而前者默认协程池中最大的协程数量为<code>MaxInt32</code>对协程池中的协程数量。同时，后者可以传入每个协程方法对应的入参和协程超时、控制任务block以及对协程函数执行错误的处理等。很明显可以看出，后者对于复杂的场景有更好的处理办法。在<code>ants</code>项目的<code>Readme</code>中也提到，可以通过<code>ants.NewPool</code>方法定义协程池的协程数量，具体的用法和<code>example</code>中的方法一类似，暂且略过不表。对于同一个协程池中每个独立的协程处理不同的方法这样的场景，也可以通过<code>NewPoolWithFunc</code>起协程池实例，然后通过<code>Invoke</code>方法将对应的处理方法作为入参传入即可。虽然有些不方便，但是这也是一种办法。</p>
+<p>​		整个协程池控制流程可以表示如下：</p>
+<p><img src="../../img/ants.png" alt=""></p>
+<p>​		可以看出，整个处理流程还是很明确的。</p>
+<p>​		继续看实现细节，可以看到对于两种实例化协程池的方法，实现的协程池对象结构不同。如果采用<code>NewPool</code>来实例化协程池，那么生成的协程池结构如下：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Pool</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#75715e">// capacity of the pool, a negative value means that the capacity of pool is limitless, an infinite pool is used to
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// avoid potential issue of endless blocking caused by nested usage of a pool: submitting a task to pool
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// which submits a new task to the same pool.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">capacity</span> <span style="color:#66d9ef">int32</span>
+	
+	<span style="color:#75715e">// running is the number of the currently running goroutines.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">running</span> <span style="color:#66d9ef">int32</span>
+	
+	<span style="color:#75715e">// workers is a slice that store the available workers.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">workers</span> <span style="color:#a6e22e">workerArray</span>
+
+	<span style="color:#75715e">// state is used to notice the pool to closed itself.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">state</span> <span style="color:#66d9ef">int32</span>
+	
+	<span style="color:#75715e">// lock for synchronous operation.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">lock</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Locker</span>
+
+	<span style="color:#75715e">// cond for waiting to get a idle worker.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">cond</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Cond</span>
+
+	<span style="color:#75715e">// workerCache speeds up the obtainment of the an usable worker in  					// function:retrieveWorker.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">workerCache</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Pool</span>
+
+	<span style="color:#75715e">// blockingNum is the number of the goroutines already been blocked on pool.Submit, protected by pool.lock
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">blockingNum</span> <span style="color:#66d9ef">int</span>
+
+	<span style="color:#a6e22e">options</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Options</span>
+}
+</code></pre></div><p>其中结构体变量<code>woker</code>是一个自定义的interface，并且定义了六个“抽象”函数<code>len</code>,<code>isEmpty</code>,<code>insert</code>,<code>detach</code>,<code>retrieveExpiry</code>和<code>reset</code>，从函数名就可以看出每个函数的作用。当前有两个结构体“实现了”这个interface，分别是<code>loopQueue</code>和<code>workerStack</code>。这两个结构体的区别就是<code>loopQueue</code>可以在初始化<code>pool</code>实例的时候<strong>预分配内存</strong>。所以如果通过<code>NewPool</code>初始化<code>pool</code>实例并且在<code>option</code>中定义了<code>PreAlloc</code>值的话，就会使用<code>loopQueue</code>来实现<code>wokrer</code>队列。</p>
+<p>​		而如果采用<code>NewPoolWithFunc</code>实例化协程池对象的话，生成的是如下的协程池对象：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">PoolWithFunc</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#75715e">// capacity of the pool.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">capacity</span> <span style="color:#66d9ef">int32</span>
+
+	<span style="color:#75715e">// running is the number of the currently running goroutines.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">running</span> <span style="color:#66d9ef">int32</span>
+
+	<span style="color:#75715e">// workers is a slice that store the available workers.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">workers</span> []<span style="color:#f92672">*</span><span style="color:#a6e22e">goWorkerWithFunc</span>
+
+	<span style="color:#75715e">// state is used to notice the pool to closed itself.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">state</span> <span style="color:#66d9ef">int32</span>
+
+	<span style="color:#75715e">// lock for synchronous operation.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">lock</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Locker</span>
+
+	<span style="color:#75715e">// cond for waiting to get a idle worker.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">cond</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Cond</span>
+
+	<span style="color:#75715e">// poolFunc is the function for processing tasks.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">poolFunc</span> <span style="color:#66d9ef">func</span>(<span style="color:#66d9ef">interface</span>{})
+
+	<span style="color:#75715e">// workerCache speeds up the obtainment of the an usable worker in function:retrieveWorker.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">workerCache</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Pool</span>
+
+	<span style="color:#75715e">// blockingNum is the number of the goroutines already been blocked on pool.Submit, protected by pool.lock
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">blockingNum</span> <span style="color:#66d9ef">int</span>
+
+	<span style="color:#a6e22e">options</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Options</span>
+}
+</code></pre></div><p>可以看到两个结构体除了wokers实现不一样、后者有<code>poolFunc</code>外，其余都大致相同。</p>
+<p>​		重点需要提的是<code>poolWithFunc</code>和<code>pool</code>都存在<code>lock</code>和<code>cond</code>结构体成员。其中<code>lock</code>采用的是前文中实现的<code>spinLock</code>。在这里，<code>lock</code>配合<code>cond</code>，通过<strong>信号</strong>实现对协程池中<code>worker</code>数量的控制。关于<code>sync.Cond</code>和<code>sync.Locker</code>配合实现对goroutine的并发控制这里先跳过，后面会有专门的博文分析。不论是<code>pool</code>还是<code>poolWithFunc</code>，都会在woker执行完<code>task</code>后置上<strong>信号量</strong>用来通知别的已经获得<strong>旋转锁</strong>的<code>worker</code>执行对应的task。同时，会起一个协程执行<code>periodicallyPurge</code>方法，专门用来清理执行超期的协程。此处的<code>lock</code>和<code>cond</code>也可以通过<a href="https://yinson123.github.io/post/gorouting/">goroutine分析</a>中提到的<code>sync.WaitGroup</code>和<code>channel</code>实现相同的功能。</p>
+<p>​		为了提高GC机制导致的性能问题，<code>ants</code>引入了<code>sync.Pool</code>来实现创建和销毁<code>worker</code>。当初始化协程池实例时，new一个<code>workerCache</code>对象，用来指定<code>worker</code>对象的结构体。虽然<code>poolWithFunc</code>和<code>pool</code>方法对应的<code>worker</code>不同，但实际上两者除了<code>args</code>channel中传入的类型不同外，没有很大的差别。此处暂时以<code>poolWithFunc</code>结构体中的<code>goWorkerWithFunc</code>为例，结构体如下：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang">	<span style="color:#75715e">// pool who owns this worker.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">pool</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">PoolWithFunc</span>
+
+	<span style="color:#75715e">// args is a job should be done.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">args</span> <span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}
+
+	<span style="color:#75715e">// recycleTime will be update when putting a worker back into queue.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">recycleTime</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Time</span>
+</code></pre></div><p><code>pool</code>定义的是当前<code>worker</code>所属的<code>pool</code>，<code>recycleTime</code>定义的是<code>worker</code>被回收的时间。<code>goWorkerWithFunc</code>和<code>goWorker</code>唯一的区别在于<code>args</code>的类型，前者通过<code>args</code>传入不同的入参，而后者通过<code>args</code>传入具体的处理方法。需要注意的是，并不是一个<code>worker</code>就对应一个执行<code>task</code>的协程。在定义<code>args</code>通道的缓冲大小方法中，作者借鉴了<a href="https://github.com/valyala/fasthttp/blob/master/workerpool.go">fasthttp中</a>的做法，通过<code>runtime.GOMAXPROCS</code>来定义channel的缓冲大小。当<code>runtime.GOMAXPROCS&gt;1</code>时，将缓冲大小设置为1，否则设置为0。也就是说，当程序使用的cpu核数超过1时，一个worker将可以同时处理两个goroutine。</p>
+<p>​		对于<code>worker</code>中具体执行<code>task</code>以及<code>task</code>执行完和超时回收的逻辑，前文的流程图中已经有做说明，具体的方法就不再细看。作者还实现了动态调整goroutine池容量的方法，实现的机制就是更改<code>pool</code>对象的<code>cap</code>大小，实现代码不再细究。</p>
+<h3 id="最后">最后</h3>
+<p>​		<code>ants</code>已经算是比较成熟的goroutine池调度和控制项目。从作者的测试结果来看，当任务量较小（小于1000W）场景下，采用<code>ants</code>控制goroutine和go原生goroutine，差别不大；但当任务量较大（大于1000W）时，才用<code>ants</code>调配goroutine可以将任务处理时间提升1倍。具体的压测参数，可以参见项目的<a href="https://github.com/panjf2000/ants#-benchmarks">Readme</a>。</p>
+<p>​		<code>ants</code>项目的代码实现层面上，我认为还是存在可以优化和完善的地方，例如<code>pool</code>和<code>poolWithFunc</code>以及<code>goWorker</code>和<code>goWorkerWithFunc</code>中存在大量重复的逻辑，后期还可以再完善。</p>
+
 </div>
 
 
