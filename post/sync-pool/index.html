@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>golang源码解读之sync.pool &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>golang源码解读之sync.pool</h1>
+  <time datetime=2020-07-17T20:30:03&#43;0800 class="post-date">Fri, Jul 17, 2020</time>
+  <h2 id="开始">开始</h2>
+<p>golang程序常常被用在高并发场景下，但是由于golang内建的<strong>GC</strong>机制会影响应用的性能，为了减少<strong>GC</strong>，golang提供了对象重用的机制，也就是<code>sync.Pool</code>对象池。 <code>sync.Pool</code>是可伸缩的，并发安全的，可以被看作是一个存放可重用对象的值的容器。 设计的目的是存放已经分配的但是暂时不用的对象，在需要用到的时候直接从pool中取。</p>
+<h2 id="gpm模型">GPM模型</h2>
+<p>在讲golang sync.pool库之前，我们需要对goroutine的<strong>GPM调度策略</strong>有一个概念。</p>
+<ul>
+<li>
+<p>G（Goroutine）：我们所说的协程，为用户级的轻量级线程，每个Goroutine对象中的<code>sched</code>保存其上下文信息</p>
+</li>
+<li>
+<p>M（Machine） ：对内核级线程的封装，数量对应真实的CPU数（真正干活的对象）</p>
+</li>
+<li>
+<p>P（Processor） ：即为G和M的调度对象，用来调度G和M之间的关联关系，其数量可通过GOMAXPROCS()来设置，默认为核心数</p>
+</li>
+</ul>
+<p>Golang对于并发处理采用的是多线程模型。通过暴露轻量级的协程goroutine（用户级线程）供用户调用，封装内核级线程，用户级线程到内核级线程的调度由<code>runtime</code>负责。不同goroutine上下文切换时，完全在用户态，节约资源消耗。</p>
+<p><img src="../../img/gpm-model.png" alt=""></p>
+<p>每个<strong>Processor</strong>对象都拥有一个<strong>LRQ</strong>（Local Run Queue），未分配的<strong>Goroutine</strong>对象保存在<strong>GRQ</strong>（Global Run Queue ）中，等待分配给某一个<strong>P</strong>的<strong>LRQ</strong>中，每个<strong>LRQ</strong>里面包含若干个用户创建的<strong>Goroutine</strong>对象，同时<strong>Processor</strong>作为桥梁对<strong>Machine</strong>和<strong>Goroutine</strong>进行了解耦，也就是说<strong>Goroutine</strong>如果想要使用<strong>Machine</strong>需要绑定一个<strong>Processor</strong>才行，上图中共有两个<strong>M</strong>和两个<strong>P</strong>也就是说我们可以同时并行处理两个<strong>goroutine</strong>。</p>
+<h2 id="syncpool源码">sync.pool源码</h2>
+<p>本文基于golang1.14。</p>
+<h3 id="pool-struct">Pool struct</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Pool</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">noCopy</span> <span style="color:#a6e22e">noCopy</span>
+
+	<span style="color:#a6e22e">local</span>     <span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span> <span style="color:#75715e">// local fixed-size per-P pool, actual type is [P]poolLocal
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">localSize</span> <span style="color:#66d9ef">uintptr</span>        <span style="color:#75715e">// size of the local array
+</span><span style="color:#75715e"></span>
+	<span style="color:#a6e22e">victim</span>     <span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span> <span style="color:#75715e">// local from previous cycle
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">victimSize</span> <span style="color:#66d9ef">uintptr</span>        <span style="color:#75715e">// size of victims array
+</span><span style="color:#75715e"></span>
+	<span style="color:#75715e">// New optionally specifies a function to generate
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// a value when Get would otherwise return nil.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// It may not be changed concurrently with calls to Get.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">New</span> <span style="color:#66d9ef">func</span>() <span style="color:#66d9ef">interface</span>{}
+}
+</code></pre></div><ul>
+<li><code>noCopy</code>是<code>Sync</code>包中常见的类型，在很多地方都有使用。它包含了一个空的结构体和两个方法。</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">noCopy</span> <span style="color:#66d9ef">struct</span>{}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#f92672">*</span><span style="color:#a6e22e">noCopy</span>) <span style="color:#a6e22e">Lock</span>()   {}
+<span style="color:#66d9ef">func</span> (<span style="color:#f92672">*</span><span style="color:#a6e22e">noCopy</span>) <span style="color:#a6e22e">Unlock</span>() {}
+</code></pre></div><p>在执行go vet静态检查时，若存在对该字段的copy，会报错。</p>
+<ul>
+<li>
+<p><code>New func()</code>定义的是当<code>pool</code>中对象被取完后，再次执行<code>Get</code>方法时，返回的默认对象。</p>
+</li>
+<li>
+<p><code>local</code>和<code>localSize</code>对应的是每个<strong>P</strong>(Processor)的<strong>poolLocal</strong>对象组成的数组及其大小。在这里，<code>local</code>是一个指向数组的指针。</p>
+</li>
+<li>
+<p><code>victim</code>和<code>victimeSize</code>是在go1.13版本才引入的用于优化原先因<strong>GC对所有sync.pool进行回收，导致的GC尖峰和STW时间损耗</strong></p>
+<p><code>Victim Cache</code>是一种缓存处理技术。</p>
+<blockquote>
+<p>所谓受害者缓存（Victim Cache），是一个与直接匹配或低相联缓存并用的、容量很小的全相联缓存。当一个数据块被逐出缓存时，并不直接丢弃，而是暂先进入受害者缓存。如果受害者缓存已满，就替换掉其中一项。当进行缓存标签匹配时，在与索引指向标签匹配的同时，并行查看受害者缓存，如果在受害者缓存发现匹配，就将其此数据块与缓存中的不匹配数据块做交换，同时返回给处理器。</p>
+<p>from wikipedia</p>
+</blockquote>
+</li>
+</ul>
+<h3 id="poollocal-struct">poolLocal Struct</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">poolLocalInternal</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">private</span> <span style="color:#66d9ef">interface</span>{} <span style="color:#75715e">// Can be used only by the respective P.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">shared</span>  <span style="color:#a6e22e">poolChain</span>   <span style="color:#75715e">// Local P can pushHead/popHead; any P can popTail.
+</span><span style="color:#75715e"></span>}
+
+<span style="color:#66d9ef">type</span> <span style="color:#a6e22e">poolLocal</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">poolLocalInternal</span>
+
+	<span style="color:#75715e">// Prevents false sharing on widespread platforms with
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// 128 mod (cache line size) = 0 .
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">pad</span> [<span style="color:#ae81ff">128</span> <span style="color:#f92672">-</span> <span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Sizeof</span>(<span style="color:#a6e22e">poolLocalInternal</span>{})<span style="color:#f92672">%</span><span style="color:#ae81ff">128</span>]<span style="color:#66d9ef">byte</span>
+}
+</code></pre></div><p>这里的<code>poolLocal</code>就是<code>Pool</code>中<code>local</code>指向的切片组成变量。它由<code>poolLocalInternal</code>和<code>pad</code>两个成员变量组成。</p>
+<ul>
+<li><code>pad</code>是为了解决**伪共享( false sharing ) **。</li>
+</ul>
+<blockquote>
+<p>CPU的缓存是以缓存行(cache line)为单位进行缓存的，当多个线程修改不同变量，而这些变量又处于同一个缓存行时就会影响彼此的性能。例如：线程1和线程2共享一个缓存行，线程1只读取缓存行中的变量1，线程2修改缓存行中的变量2，虽然线程1和线程2操作的是不同的变量，由于变量1和变量2同处于一个缓存行中，当变量2被修改后，缓存行失效，线程1要重新从主存中读取，因此导致缓存失效，从而产生性能问题。</p>
+<p>from wikipedia</p>
+</blockquote>
+<ul>
+<li><code>poolLocalInternal</code>结构中由<code>private</code>和<code>shared</code>字段，分别保存每个<code>localPool</code>的私有对象和共享列表对象。其中<code>shared</code>对象的实现在golang1.13版本时从原先的<strong>Mutex+Slice换成了现在的lock-free的数据结构poolChain</strong></li>
+</ul>
+<h3 id="poolchain">poolChain</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">poolChain</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#75715e">// head is the poolDequeue to push to. This is only accessed
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// by the producer, so doesn&#39;t need to be synchronized.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">head</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">poolChainElt</span>
+
+	<span style="color:#75715e">// tail is the poolDequeue to popTail from. This is accessed
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// by consumers, so reads and writes must be atomic.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">tail</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">poolChainElt</span>
+}
+
+<span style="color:#66d9ef">type</span> <span style="color:#a6e22e">poolChainElt</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">poolDequeue</span>
+	<span style="color:#a6e22e">next</span>, <span style="color:#a6e22e">prev</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">poolChainElt</span>
+}
+
+<span style="color:#66d9ef">type</span> <span style="color:#a6e22e">poolDequeue</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">headTail</span> <span style="color:#66d9ef">uint64</span>
+
+	<span style="color:#a6e22e">vals</span> []<span style="color:#a6e22e">eface</span>
+}
+</code></pre></div><p>可以看到<code>poolChainElt</code>类似于双向链表。同时，对于<code>poolDequeque</code>的操作都用到了<code>atomic</code>的方式实现，通过<strong>CAS</strong>巧妙地避免了操作被block。<code>poolDequeque</code>定义了三种操作：<strong>popHead</strong>、<strong>pushHead</strong>和<strong>popTail</strong>。其中，<strong>popHead</strong>和<strong>pushHead</strong>被用从当前<strong>P</strong>的<code>localPool</code>的共享池中获取对象和往当前<strong>P</strong>的<code>localPool</code>中插入对象。因为每个时间点对于单个<strong>P</strong>而言，都只有一个<strong>goroutine</strong>工作，所以<code>poolDequeque</code>可以看成是一个生产者；同时，<strong>popTail</strong>在从别的<strong>P</strong>中<strong>偷取</strong>对象时被调用（后文会提到该机制），可以看成是多消费者，所以<strong>popTail</strong>需要注意并发安全。此处以<strong>popTail</strong>为例（其余方法实现也类似）：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">c</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">poolChain</span>) <span style="color:#a6e22e">popTail</span>() (<span style="color:#66d9ef">interface</span>{}, <span style="color:#66d9ef">bool</span>) {
+	<span style="color:#a6e22e">d</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">loadPoolChainElt</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">tail</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">d</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>, <span style="color:#66d9ef">false</span>
+	}
+
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#75715e">// It&#39;s important that we load the next pointer
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// *before* popping the tail. In general, d may be
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// transiently empty, but if next is non-nil before
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// the pop and the pop fails, then d is permanently
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// empty, which is the only condition under which it&#39;s
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// safe to drop d from the chain.
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">d2</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">loadPoolChainElt</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">next</span>)
+
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">val</span>, <span style="color:#a6e22e">ok</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">popTail</span>(); <span style="color:#a6e22e">ok</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">val</span>, <span style="color:#a6e22e">ok</span>
+		}
+
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">d2</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#75715e">// This is the only dequeue. It&#39;s empty right
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// now, but could be pushed to in the future.
+</span><span style="color:#75715e"></span>			<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>, <span style="color:#66d9ef">false</span>
+		}
+
+		<span style="color:#75715e">// The tail of the chain has been drained, so move on
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// to the next dequeue. Try to drop it from the chain
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// so the next pop doesn&#39;t have to look at the empty
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// dequeue again.
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapPointer</span>((<span style="color:#f92672">*</span><span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>)(<span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">tail</span>)), <span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#a6e22e">d</span>), <span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#a6e22e">d2</span>)) {
+			<span style="color:#75715e">// We won the race. Clear the prev pointer so
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// the garbage collector can collect the empty
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// dequeue and so popHead doesn&#39;t back up
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// further than necessary.
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">storePoolChainElt</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">d2</span>.<span style="color:#a6e22e">prev</span>, <span style="color:#66d9ef">nil</span>)
+		}
+		<span style="color:#a6e22e">d</span> = <span style="color:#a6e22e">d2</span>
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">d</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">poolDequeue</span>) <span style="color:#a6e22e">popTail</span>() (<span style="color:#66d9ef">interface</span>{}, <span style="color:#66d9ef">bool</span>) {
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">slot</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">eface</span>
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#a6e22e">ptrs</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">LoadUint64</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">headTail</span>)
+		<span style="color:#a6e22e">head</span>, <span style="color:#a6e22e">tail</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">unpack</span>(<span style="color:#a6e22e">ptrs</span>)
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">tail</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">head</span> {
+			<span style="color:#75715e">// Queue is empty.
+</span><span style="color:#75715e"></span>			<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>, <span style="color:#66d9ef">false</span>
+		}
+
+		<span style="color:#75715e">// Confirm head and tail (for our speculative check
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// above) and increment tail. If this succeeds, then
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// we own the slot at tail.
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">ptrs2</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">pack</span>(<span style="color:#a6e22e">head</span>, <span style="color:#a6e22e">tail</span><span style="color:#f92672">+</span><span style="color:#ae81ff">1</span>)
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapUint64</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">headTail</span>, <span style="color:#a6e22e">ptrs</span>, <span style="color:#a6e22e">ptrs2</span>) {
+			<span style="color:#75715e">// Success.
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">slot</span> = <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">vals</span>[<span style="color:#a6e22e">tail</span><span style="color:#f92672">&amp;</span>uint32(len(<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">vals</span>)<span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>)]
+			<span style="color:#66d9ef">break</span>
+		}
+	}
+
+	<span style="color:#75715e">// We now own slot.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">val</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">*</span>(<span style="color:#f92672">*</span><span style="color:#66d9ef">interface</span>{})(<span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#a6e22e">slot</span>))
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">val</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">dequeueNil</span>(<span style="color:#66d9ef">nil</span>) {
+		<span style="color:#a6e22e">val</span> = <span style="color:#66d9ef">nil</span>
+	}
+
+	<span style="color:#75715e">// Tell pushHead that we&#39;re done with this slot. Zeroing the
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// slot is also important so we don&#39;t leave behind references
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// that could keep this object live longer than necessary.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">//
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// We write to val first and then publish that we&#39;re done with
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// this slot by atomically writing to typ.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">slot</span>.<span style="color:#a6e22e">val</span> = <span style="color:#66d9ef">nil</span>
+	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StorePointer</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">slot</span>.<span style="color:#a6e22e">typ</span>, <span style="color:#66d9ef">nil</span>)
+	<span style="color:#75715e">// At this point pushHead owns the slot.
+</span><span style="color:#75715e"></span>
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">val</span>, <span style="color:#66d9ef">true</span>
+}
+</code></pre></div><p>先看<code>func (d *poolDequeue) popTail()</code>方法。<code>poolDequeue</code>定义了一个结构体变量<code>headTail</code>，类型为<code>uint64</code>(便于进行CAS操作)，其中高32位保存链表<code>Head</code>地址，低32位保存链表<code>Tail</code>地址。当执行<code>popTail</code>方法时，先调用<code>unpack</code>方法，分别解析<code>Head</code>和<code>Tail</code>所在地址，以此判断该链表是否为空。若不为空，则取出尾端的值，同时<code>tail</code>前移一位并将原先尾端值置空(便于内存回收)。<code>func (c *poolChain) popTail() </code>的处理也类似。方法实现本身不难，值得学习的是位运算以及各种原子操作以保证<strong>free-lock</strong>。</p>
+<p>值得一提的是，此处同时引入两种结构体<code>poolChain</code>和<code>poolDequeue</code>的原因是<code>poolDequeue</code>结构体成员<code>vals</code>的限制。该参数用于存储对象值，但其实现其实是一个长度固定的数组。若直接采用<code>poolDequeue</code>实现<code>localPool</code>则很难很好的设置数组长度(过长导致空间浪费，过短又导致存储大小受限)，由于<strong>Slice</strong>扩展空间时是新申请地址并对值进行拷贝，所以就没法保存其地址。所以此处引入<code>poolChain</code>对象，以便于对<code>localPool</code>实现动态大小控制。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">c</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">poolChain</span>) <span style="color:#a6e22e">pushHead</span>(<span style="color:#a6e22e">val</span> <span style="color:#66d9ef">interface</span>{}) {
+	<span style="color:#a6e22e">d</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">head</span>
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">d</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#75715e">// Initialize the chain.
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">const</span> <span style="color:#a6e22e">initSize</span> = <span style="color:#ae81ff">8</span> <span style="color:#75715e">// Must be a power of 2
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">d</span> = new(<span style="color:#a6e22e">poolChainElt</span>)
+		<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">vals</span> = make([]<span style="color:#a6e22e">eface</span>, <span style="color:#a6e22e">initSize</span>)
+		<span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">head</span> = <span style="color:#a6e22e">d</span>
+		<span style="color:#a6e22e">storePoolChainElt</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">tail</span>, <span style="color:#a6e22e">d</span>)
+	}
+
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">pushHead</span>(<span style="color:#a6e22e">val</span>) {
+		<span style="color:#66d9ef">return</span>
+	}
+
+	<span style="color:#75715e">// The current dequeue is full. Allocate a new one of twice
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// the size.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">newSize</span> <span style="color:#f92672">:=</span> len(<span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">vals</span>) <span style="color:#f92672">*</span> <span style="color:#ae81ff">2</span>
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">newSize</span> <span style="color:#f92672">&gt;=</span> <span style="color:#a6e22e">dequeueLimit</span> {
+		<span style="color:#75715e">// Can&#39;t make it any bigger.
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">newSize</span> = <span style="color:#a6e22e">dequeueLimit</span>
+	}
+
+	<span style="color:#a6e22e">d2</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">poolChainElt</span>{<span style="color:#a6e22e">prev</span>: <span style="color:#a6e22e">d</span>}
+	<span style="color:#a6e22e">d2</span>.<span style="color:#a6e22e">vals</span> = make([]<span style="color:#a6e22e">eface</span>, <span style="color:#a6e22e">newSize</span>)
+	<span style="color:#a6e22e">c</span>.<span style="color:#a6e22e">head</span> = <span style="color:#a6e22e">d2</span>
+	<span style="color:#a6e22e">storePoolChainElt</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">d</span>.<span style="color:#a6e22e">next</span>, <span style="color:#a6e22e">d2</span>)
+	<span style="color:#a6e22e">d2</span>.<span style="color:#a6e22e">pushHead</span>(<span style="color:#a6e22e">val</span>)
+}
+</code></pre></div><p>从该段代码中可以看到， 一开始，它会使用长度为8的<code>poolDequeue</code>做存储，一旦这个队列满了，就会再创建一个长度为16的队列，以此类推，只要当前的队列满了，就会新创建2*n的<code>poolDequeue</code>做存储。如果当前的<code>poolDequeue</code>消费完，就会丢弃(此处实现类似于<strong>Slice</strong>)。</p>
+<h3 id="pool">Pool</h3>
+<p>再看<code>Pool</code>的执行方法：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Pool</span>) <span style="color:#a6e22e">Get</span>() <span style="color:#66d9ef">interface</span>{} {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Enabled</span> {
+		<span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Disable</span>()
+	}
+	<span style="color:#a6e22e">l</span>, <span style="color:#a6e22e">pid</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">pin</span>()
+	<span style="color:#a6e22e">x</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">private</span>
+	<span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">private</span> = <span style="color:#66d9ef">nil</span>
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#75715e">// Try to pop the head of the local shard. We prefer
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// the head over the tail for temporal locality of
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// reuse.
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">x</span>, <span style="color:#a6e22e">_</span> = <span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">shared</span>.<span style="color:#a6e22e">popHead</span>()
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#a6e22e">x</span> = <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">getSlow</span>(<span style="color:#a6e22e">pid</span>)
+		}
+	}
+	<span style="color:#a6e22e">runtime_procUnpin</span>()
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Enabled</span> {
+		<span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Enable</span>()
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Acquire</span>(<span style="color:#a6e22e">poolRaceAddr</span>(<span style="color:#a6e22e">x</span>))
+		}
+	}
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">New</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">x</span> = <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">New</span>()
+	}
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">x</span>
+}
+</code></pre></div><ul>
+<li>
+<p>如果<code>private</code>不是空的，那就直接从<code>pravite</code>中拿</p>
+</li>
+<li>
+<p>如果<code>private</code>是空的，那就从<code>shared</code>结构中取<code>Head</code>，同时将<code>Head</code>pop掉</p>
+</li>
+<li>
+<p>如果<code>shared</code>也是空的，那就调用<code>getSlow</code>方法，从别的<strong>P</strong>的<code>shared</code>中偷一个，偷不到的话，就从<code>victimeCache</code>中找一个</p>
+</li>
+<li>
+<p>如果还是没有，就调用<code>New</code>方法，新建一个对象</p>
+</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Pool</span>) <span style="color:#a6e22e">pin</span>() (<span style="color:#f92672">*</span><span style="color:#a6e22e">poolLocal</span>, <span style="color:#66d9ef">int</span>) {
+	<span style="color:#a6e22e">pid</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">runtime_procPin</span>()
+	<span style="color:#a6e22e">s</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">LoadUintptr</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">localSize</span>) <span style="color:#75715e">// load-acquire
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">l</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span>                          <span style="color:#75715e">// load-consume
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> uintptr(<span style="color:#a6e22e">pid</span>) &lt; <span style="color:#a6e22e">s</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">indexLocal</span>(<span style="color:#a6e22e">l</span>, <span style="color:#a6e22e">pid</span>), <span style="color:#a6e22e">pid</span>
+	}
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">pinSlow</span>()
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Pool</span>) <span style="color:#a6e22e">pinSlow</span>() (<span style="color:#f92672">*</span><span style="color:#a6e22e">poolLocal</span>, <span style="color:#66d9ef">int</span>) {
+	<span style="color:#75715e">// Retry under the mutex.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Can not lock the mutex while pinned.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">runtime_procUnpin</span>()
+	<span style="color:#a6e22e">allPoolsMu</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">allPoolsMu</span>.<span style="color:#a6e22e">Unlock</span>()
+	<span style="color:#a6e22e">pid</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">runtime_procPin</span>()
+	<span style="color:#75715e">// poolCleanup won&#39;t be called while we are pinned.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">s</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">localSize</span>
+	<span style="color:#a6e22e">l</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span>
+	<span style="color:#66d9ef">if</span> uintptr(<span style="color:#a6e22e">pid</span>) &lt; <span style="color:#a6e22e">s</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">indexLocal</span>(<span style="color:#a6e22e">l</span>, <span style="color:#a6e22e">pid</span>), <span style="color:#a6e22e">pid</span>
+	}
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">allPools</span> = append(<span style="color:#a6e22e">allPools</span>, <span style="color:#a6e22e">p</span>)
+	}
+	<span style="color:#75715e">// If GOMAXPROCS changes between GCs, we re-allocate the array and lose the old one.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">size</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">runtime</span>.<span style="color:#a6e22e">GOMAXPROCS</span>(<span style="color:#ae81ff">0</span>)
+	<span style="color:#a6e22e">local</span> <span style="color:#f92672">:=</span> make([]<span style="color:#a6e22e">poolLocal</span>, <span style="color:#a6e22e">size</span>)
+	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StorePointer</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span>, <span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">local</span>[<span style="color:#ae81ff">0</span>])) <span style="color:#75715e">// store-release
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StoreUintptr</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">localSize</span>, uintptr(<span style="color:#a6e22e">size</span>))         <span style="color:#75715e">// store-release
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">return</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">local</span>[<span style="color:#a6e22e">pid</span>], <span style="color:#a6e22e">pid</span>
+}
+</code></pre></div><p>从<code>pin</code>和<code>pinSlow</code>来看，如果当前的<code>pid</code>在<code>PoolLocal</code>数组中，即<code>pid &lt; p.localSize</code>，那么直接返回<code>pid</code>对应的<code>localPool</code>对象；否则，说明当前<code>execution</code>状态的<strong>P</strong>比之前多，所以调用<code>pinSlow</code>方法重新建<code>local</code>, <code>localSize</code>对象。值得注意的是，在<code>pinSlow</code>方法中，先写入<code>local</code>后写入<code>localSize</code>，在<code>pin</code>中，先读取<code>localSize</code>的值，再读取<code>local</code>的值。 注意Pool的实现中使用了<code>runtime_procPin()</code>方法，它可以将一个<strong>goroutine</strong>死死占用当前使用的<strong>P</strong>，不允许其它<strong>goroutine</strong>抢占，这样它就可以自由的使用<code>shard</code>中和这个P相关的<code>localPool</code>，不必担心竞争的问题，除非调用<code>runtime_procUnpin</code> 释放。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Pool</span>) <span style="color:#a6e22e">getSlow</span>(<span style="color:#a6e22e">pid</span> <span style="color:#66d9ef">int</span>) <span style="color:#66d9ef">interface</span>{} {
+	<span style="color:#75715e">// See the comment in pin regarding ordering of the loads.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">size</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">LoadUintptr</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">localSize</span>) <span style="color:#75715e">// load-acquire
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">locals</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span>                        <span style="color:#75715e">// load-consume
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// Try to steal one element from other procs.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; int(<span style="color:#a6e22e">size</span>); <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">l</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">indexLocal</span>(<span style="color:#a6e22e">locals</span>, (<span style="color:#a6e22e">pid</span><span style="color:#f92672">+</span><span style="color:#a6e22e">i</span><span style="color:#f92672">+</span><span style="color:#ae81ff">1</span>)<span style="color:#f92672">%</span>int(<span style="color:#a6e22e">size</span>))
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span>, <span style="color:#a6e22e">_</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">shared</span>.<span style="color:#a6e22e">popTail</span>(); <span style="color:#a6e22e">x</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">x</span>
+		}
+	}
+
+	<span style="color:#75715e">// Try the victim cache. We do this after attempting to steal
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// from all primary caches because we want objects in the
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// victim cache to age out if at all possible.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">size</span> = <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">LoadUintptr</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victimSize</span>)
+	<span style="color:#66d9ef">if</span> uintptr(<span style="color:#a6e22e">pid</span>) <span style="color:#f92672">&gt;=</span> <span style="color:#a6e22e">size</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>
+	}
+	<span style="color:#a6e22e">locals</span> = <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victim</span>
+	<span style="color:#a6e22e">l</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">indexLocal</span>(<span style="color:#a6e22e">locals</span>, <span style="color:#a6e22e">pid</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">private</span>; <span style="color:#a6e22e">x</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">private</span> = <span style="color:#66d9ef">nil</span>
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">x</span>
+	}
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; int(<span style="color:#a6e22e">size</span>); <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">l</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">indexLocal</span>(<span style="color:#a6e22e">locals</span>, (<span style="color:#a6e22e">pid</span><span style="color:#f92672">+</span><span style="color:#a6e22e">i</span>)<span style="color:#f92672">%</span>int(<span style="color:#a6e22e">size</span>))
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">x</span>, <span style="color:#a6e22e">_</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">l</span>.<span style="color:#a6e22e">shared</span>.<span style="color:#a6e22e">popTail</span>(); <span style="color:#a6e22e">x</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">x</span>
+		}
+	}
+
+	<span style="color:#75715e">// Mark the victim cache as empty for future gets don&#39;t bother
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// with it.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StoreUintptr</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victimSize</span>, <span style="color:#ae81ff">0</span>)
+
+	<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>
+}
+</code></pre></div><p><code>getSlow</code>方法实现了从其他<strong>P</strong>的<code>shared</code>中“偷取”对象的逻辑。</p>
+<p>在整个<code>pool</code>包的<code>init</code>函数中， 向 <strong>GC</strong> 注册 <code>poolCleanup</code> 函数，在每次<strong>TWS</strong>之前都会运行该函数。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">poolCleanup</span>() {
+	<span style="color:#75715e">// This function is called with the world stopped, at the beginning of a garbage collection.
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// It must not allocate and probably should not call any runtime functions.
+</span><span style="color:#75715e"></span>
+	<span style="color:#75715e">// Because the world is stopped, no pool user can be in a
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// pinned section (in effect, this has all Ps pinned).
+</span><span style="color:#75715e"></span>
+	<span style="color:#75715e">// Drop victim caches from all pools.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">p</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">oldPools</span> {
+		<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victim</span> = <span style="color:#66d9ef">nil</span>
+		<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victimSize</span> = <span style="color:#ae81ff">0</span>
+	}
+
+	<span style="color:#75715e">// Move primary cache to victim cache.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">p</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">allPools</span> {
+		<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victim</span> = <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span>
+		<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">victimSize</span> = <span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">localSize</span>
+		<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">local</span> = <span style="color:#66d9ef">nil</span>
+		<span style="color:#a6e22e">p</span>.<span style="color:#a6e22e">localSize</span> = <span style="color:#ae81ff">0</span>
+	}
+
+	<span style="color:#75715e">// The pools with non-empty primary caches now have non-empty
+</span><span style="color:#75715e"></span>	<span style="color:#75715e">// victim caches and no pools have primary caches.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">oldPools</span>, <span style="color:#a6e22e">allPools</span> = <span style="color:#a6e22e">allPools</span>, <span style="color:#66d9ef">nil</span>
+}
+</code></pre></div><p>主要功能是将当前<code>victim</code>清空，再把本地<code>local</code>的池化对象赋值给<code>victim</code> ，最后把<code>local</code>清空。以此实现 <code>victim cache</code>的机制。<code>Pool</code>中的对象可能会在两次<strong>GC</strong>周期内被释放，而不是原先的一个<strong>GC</strong>周期。</p>
+<h3 id="syncpool中getput逻辑">Sync.Pool中Get/Put逻辑</h3>
+<p><img src="../../img/pool-get-put.png" alt=""></p>
+<h2 id="最后">最后</h2>
+<p>通过以上的解读，我们可以看到，<code>sync.Pool</code>的<code>Get</code>方法并不会对获取到的对象值做任何的保证，因为放入本地池中的值有可能会在任何时候被删除，但是不通知调用者。放入共享池中的值有可能被其他的<strong>goroutine</strong>“偷走”。 所以对象池严格意义上来说是一个临时的对象池，适用于储存一些会在<strong>goroutine</strong>间分享的临时对象。主要作用是减少<strong>GC</strong>，提高性能。在Golang中最常见的使用场景是<strong>fmt</strong>包中的输出缓冲区。</p>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>
