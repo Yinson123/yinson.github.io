@@ -422,7 +422,8 @@
 }
 </code></pre></div><p>主要功能是将当前<code>victim</code>清空，再把本地<code>local</code>的池化对象赋值给<code>victim</code> ，最后把<code>local</code>清空。以此实现 <code>victim cache</code>的机制。<code>Pool</code>中的对象可能会在两次<strong>GC</strong>周期内被释放，而不是原先的一个<strong>GC</strong>周期。</p>
 <h3 id="syncpool中getput逻辑">Sync.Pool中Get/Put逻辑</h3>
-<p><img src="../../img/pool-get-put.png" alt=""></p>
+<p><img src="../../img/pool-get.png" alt=""></p>
+<p><img src="../../img/pool-put.png" alt=""></p>
 <h2 id="最后">最后</h2>
 <p>通过以上的解读，我们可以看到，<code>sync.Pool</code>的<code>Get</code>方法并不会对获取到的对象值做任何的保证，因为放入本地池中的值有可能会在任何时候被删除，但是不通知调用者。放入共享池中的值有可能被其他的<strong>goroutine</strong>“偷走”。 所以对象池严格意义上来说是一个临时的对象池，适用于储存一些会在<strong>goroutine</strong>间分享的临时对象。主要作用是减少<strong>GC</strong>，提高性能。在Golang中最常见的使用场景是<strong>fmt</strong>包中的输出缓冲区。</p>
 
