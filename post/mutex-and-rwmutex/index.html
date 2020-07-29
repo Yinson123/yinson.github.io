@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>golang源码解读之互斥锁和读写锁 &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>golang源码解读之互斥锁和读写锁</h1>
+  <time datetime=2020-07-19T19:31:11&#43;0800 class="post-date">Sun, Jul 19, 2020</time>
+  <p>因为golang主推的高并发能力，锁在程序的处理中就显得格外的重要。今天就来分析一下golang中的<code>Mutex</code>和<code>RWMutex</code>。<em>本文所有分析都基于golang1.14.6</em></p>
+<h2 id="mutex">Mutex</h2>
+<p>互斥锁的实现一般有两种方式：等待和阻塞。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#75715e">// 等待
+</span><span style="color:#75715e"></span><span style="color:#a6e22e">wait</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">bar</span> <span style="color:#66d9ef">int</span>) {
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">bar</span> &lt; <span style="color:#ae81ff">0</span> {
+		<span style="color:#75715e">// options
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">bar</span><span style="color:#f92672">--</span>
+	}
+}
+
+<span style="color:#75715e">// 阻塞
+</span><span style="color:#75715e"></span><span style="color:#a6e22e">block</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">s</span> <span style="color:#f92672">*</span><span style="color:#66d9ef">uintptr</span>) {
+	<span style="color:#f92672">*</span><span style="color:#a6e22e">s</span><span style="color:#f92672">--</span>
+	<span style="color:#66d9ef">if</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">s</span> &lt; <span style="color:#ae81ff">0</span> {
+		<span style="color:#75715e">// add process to wait list and wait for calling
+</span><span style="color:#75715e"></span>	}
+}
+</code></pre></div><ul>
+<li>
+<p>采用等待的方式，CPU会空转；如果在当前时间片内锁被其他进程释放，那么当前进程就能直接获取锁而无需等待CPU调度。</p>
+</li>
+<li>
+<p>阻塞不会导致CPU空转，但是进程的上下文切换时间也会被浪费。</p>
+</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Mutex</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">state</span> <span style="color:#66d9ef">int32</span>
+	<span style="color:#a6e22e">sema</span>  <span style="color:#66d9ef">uint32</span>
+}
+
+<span style="color:#66d9ef">const</span> (
+    <span style="color:#a6e22e">mutexLocked</span> = <span style="color:#ae81ff">1</span> <span style="color:#f92672">&lt;&lt;</span> <span style="color:#66d9ef">iota</span> <span style="color:#75715e">// mutex is locked
+</span><span style="color:#75715e"></span>    <span style="color:#a6e22e">mutexWoken</span>
+    <span style="color:#a6e22e">mutexStarving</span>
+    <span style="color:#a6e22e">mutexWaiterShift</span> = <span style="color:#66d9ef">iota</span>
+)
+</code></pre></div><p>可以看到golang中<code>Mutex</code>结构体的定义很简单，一个表示状态的成员<code>state</code>和一个表示信号量的成员<code>sema</code>。<code>state</code>变量被划分成4个部分：<code>mutexLock</code>，<code>mutextWoken</code>， <code>mutexStarving</code>和当前被阻塞的goroutine数量。</p>
+<p><img src="../../mutex-state.png" alt=""></p>
+<p>含义如下：</p>
+<ul>
+<li><code>mutexLocked</code> 对应右边低位第一个bit。值为1，表示锁被占用。值为0，表示锁未被占用</li>
+<li><code>mutexWoken</code> 对应右边低位第二个bit。值为1，表示打上唤醒标记。值为0，表示没有唤醒标记， 它主要用于<strong>自旋状态的通知</strong>和<strong>锁公平性的保证</strong></li>
+<li><code>mutexStarving</code> 对应右边低位第三个bit。值为1，表示锁处于饥饿模式。值为0，表示锁存于正常模式</li>
+<li><code>mutexWaiterShift</code> 是偏移量。它值为3。用法是<code>state&gt;&gt;=mutexWaiterShift</code>之后，state的值就表示当前阻塞等待锁的goroutine个数。最多可以阻塞2^29个goroutine</li>
+</ul>
+<p>mutex有两种模式：普通模式和饥饿模式。</p>
+<blockquote>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">在普通模式下，等待者是按FIFO排队等待，但是被唤醒的等待者不是直接拥有锁，而是要和新来的goroutine竞争。由于新来的goroutine已经在CPU上了，所以唤醒的等待者很有可能获取不到锁。在这种情况下，被唤醒的等待者直接加入到队列首部。如果被唤醒的等待者超过1ms没获取到锁，那么mutex将切换到饥饿模式。
+    
+在饥饿模式下，锁直接交给队列的第一个等待者。新来的goroutine不要去尝试获取锁，也不要自旋，即便是mutex处于unlock状态。直接将goroutine加到队列尾部。
+    
+如果一个等待者获取了锁，在下面两种情况之一将转换为普通模式：1.等待者处于队列尾部；2.等待者等待时间少于1ms。
+    
+普通模式是为了考虑更好的性能，因为一个goroutine可以连续多次获取锁，避免了等待调度和线程切换上下文时间。
+饥饿模式解决了队尾的等待者一直无法获取锁的问题。
+</code></pre></div></blockquote>
+<p><code>Mutex</code>一共有两个方法：<code>Lock</code>和<code>Unlock</code>。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">m</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Mutex</span>) <span style="color:#a6e22e">Lock</span>() {
+	<span style="color:#75715e">// Fast path: grab unlocked mutex.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>, <span style="color:#ae81ff">0</span>, <span style="color:#a6e22e">mutexLocked</span>) {
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Enabled</span> {
+			<span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Acquire</span>(<span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#a6e22e">m</span>))
+		}
+		<span style="color:#66d9ef">return</span>
+	}
+	<span style="color:#75715e">// Slow path (outlined so that the fast path can be inlined)
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">lockSlow</span>()
+}
+</code></pre></div><p>先来看<code>Lock</code>方法。首先判断锁是否被占用。若<code>state</code>值为0(未被占用)，则使用原子操作<strong>CAS</strong>将值置为1(占用)；否则调用<code>lockSlow</code>方法等待该锁被释放并再次占用。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">m</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Mutex</span>) <span style="color:#a6e22e">lockSlow</span>() {
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">waitStartTime</span> <span style="color:#66d9ef">int64</span>
+	<span style="color:#a6e22e">starving</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">false</span>
+	<span style="color:#a6e22e">awoke</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">false</span>
+	<span style="color:#a6e22e">iter</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>
+	<span style="color:#a6e22e">old</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#75715e">// 进入到这个循环的，有两种角色goroutine
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// 一种是新来的goroutine。另一种是被唤醒的goroutine。所以它们可能在这个地方再一起竞争锁
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// 如果新来的goroutine抢成功了，那另一个只能再阻塞着等待。但超过1ms后，锁会转换成饥饿模式
+</span><span style="color:#75715e"></span>		<span style="color:#75715e">// 在这个模式下，所有新来的goroutine必须排在队伍的后面。没有抢锁资格
+</span><span style="color:#75715e"></span>
+		<span style="color:#75715e">// 饥饿模式和锁被占用的情况下，不能自旋
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span>(<span style="color:#a6e22e">mutexLocked</span>|<span style="color:#a6e22e">mutexStarving</span>) <span style="color:#f92672">==</span> <span style="color:#a6e22e">mutexLocked</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">runtime_canSpin</span>(<span style="color:#a6e22e">iter</span>) {
+			<span style="color:#75715e">// woken位没有被标记；被阻塞等待goroutine的个数大于0
+</span><span style="color:#75715e"></span>			<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">awoke</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexWoken</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&gt;&gt;</span><span style="color:#a6e22e">mutexWaiterShift</span> <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">&amp;&amp;</span>
+				<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>, <span style="color:#a6e22e">old</span>, <span style="color:#a6e22e">old</span>|<span style="color:#a6e22e">mutexWoken</span>) {
+				<span style="color:#75715e">// 可以自旋了，那就设置上woken位，在unlock时，如果发现有别的goroutine在自旋，就立即返回，有被阻塞的goroutine也不唤醒了
+</span><span style="color:#75715e"></span>				<span style="color:#a6e22e">awoke</span> = <span style="color:#66d9ef">true</span>
+			}
+			<span style="color:#75715e">// runtime_doSpin -&gt; sync_runtime_doSpin
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 每次自旋30个时钟周期，最多120个周期
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">runtime_doSpin</span>()
+			<span style="color:#a6e22e">iter</span><span style="color:#f92672">++</span>
+			<span style="color:#a6e22e">old</span> = <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>
+			<span style="color:#66d9ef">continue</span>
+		}
+		<span style="color:#75715e">// 自旋完了还是等不到锁 或 可以上锁
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">new</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">old</span>
+		<span style="color:#75715e">// 饥饿模式下的锁不抢
+</span><span style="color:#75715e"></span>		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexStarving</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+			<span style="color:#75715e">// 非饥饿模式下，可以抢锁
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">new</span> <span style="color:#f92672">|=</span> <span style="color:#a6e22e">mutexLocked</span>
+		}
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span>(<span style="color:#a6e22e">mutexLocked</span>|<span style="color:#a6e22e">mutexStarving</span>) <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> {
+			<span style="color:#75715e">// 已经被上锁了，或锁处于饥饿模式下，就阻塞当前的goroutine
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">new</span> <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span> <span style="color:#f92672">&lt;&lt;</span> <span style="color:#a6e22e">mutexWaiterShift</span>
+		}
+		
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">starving</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexLocked</span> <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> {
+			<span style="color:#75715e">// 当前的goroutine已经被饿着了，所以要把锁设置为饥饿模式
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">new</span> <span style="color:#f92672">|=</span> <span style="color:#a6e22e">mutexStarving</span>
+		}
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">awoke</span> {
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">new</span><span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexWoken</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+				<span style="color:#a6e22e">throw</span>(<span style="color:#e6db74">&#34;sync: inconsistent mutex state&#34;</span>)
+			}
+			<span style="color:#75715e">// 当前的goroutine有自旋过，但现在已经自旋结束了。所以要取消woken标记
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">new</span> <span style="color:#f92672">&amp;^=</span> <span style="color:#a6e22e">mutexWoken</span>
+		}
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>, <span style="color:#a6e22e">old</span>, <span style="color:#a6e22e">new</span>) {
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span>(<span style="color:#a6e22e">mutexLocked</span>|<span style="color:#a6e22e">mutexStarving</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+				<span style="color:#75715e">// 成功上锁
+</span><span style="color:#75715e"></span>				<span style="color:#66d9ef">break</span> <span style="color:#75715e">// locked the mutex with CAS
+</span><span style="color:#75715e"></span>			}
+			<span style="color:#75715e">// 主要是为了和第一次调用的Lock的g划分不同的优先级
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">queueLifo</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">waitStartTime</span> <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span>
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">waitStartTime</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+				<span style="color:#a6e22e">waitStartTime</span> = <span style="color:#a6e22e">runtime_nanotime</span>()
+			}
+			<span style="color:#75715e">// 使用信号量阻塞当前的g
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 如果当前g已经阻塞等待过一次了，queueLifo被赋值true，排到等待队列的最前方
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">runtime_SemacquireMutex</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">sema</span>, <span style="color:#a6e22e">queueLifo</span>, <span style="color:#ae81ff">1</span>)
+			<span style="color:#75715e">// 判断当前g是否被饿着了
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">starving</span> = <span style="color:#a6e22e">starving</span> <span style="color:#f92672">||</span> <span style="color:#a6e22e">runtime_nanotime</span>()<span style="color:#f92672">-</span><span style="color:#a6e22e">waitStartTime</span> &gt; <span style="color:#a6e22e">starvationThresholdNs</span>
+			<span style="color:#a6e22e">old</span> = <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexStarving</span> <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> {
+				<span style="color:#75715e">// 饥饿模式下被唤醒的
+</span><span style="color:#75715e"></span>				<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span>(<span style="color:#a6e22e">mutexLocked</span>|<span style="color:#a6e22e">mutexWoken</span>) <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">||</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&gt;&gt;</span><span style="color:#a6e22e">mutexWaiterShift</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+					<span style="color:#a6e22e">throw</span>(<span style="color:#e6db74">&#34;sync: inconsistent mutex state&#34;</span>)
+				}
+				<span style="color:#a6e22e">delta</span> <span style="color:#f92672">:=</span> int32(<span style="color:#a6e22e">mutexLocked</span> <span style="color:#f92672">-</span> <span style="color:#ae81ff">1</span><span style="color:#f92672">&lt;&lt;</span><span style="color:#a6e22e">mutexWaiterShift</span>)
+				<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">starving</span> <span style="color:#f92672">||</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&gt;&gt;</span><span style="color:#a6e22e">mutexWaiterShift</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> {
+					<span style="color:#75715e">// 退出饥饿模式
+</span><span style="color:#75715e"></span>					<span style="color:#75715e">// 饥饿模式会影响自旋
+</span><span style="color:#75715e"></span>					<span style="color:#a6e22e">delta</span> <span style="color:#f92672">-=</span> <span style="color:#a6e22e">mutexStarving</span>
+				}
+				<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>, <span style="color:#a6e22e">delta</span>)
+				<span style="color:#66d9ef">break</span>
+			}
+			<span style="color:#75715e">// 继续竞争锁
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 必须设置为true，这样新一轮的CAS之前，就可以取消woken模式。
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 因为通过信号量释放锁时，为了保持公平性，会同时设置woken模式。
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">awoke</span> = <span style="color:#66d9ef">true</span>
+			<span style="color:#a6e22e">iter</span> = <span style="color:#ae81ff">0</span>
+		} <span style="color:#66d9ef">else</span> {
+			<span style="color:#a6e22e">old</span> = <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>
+		}
+	}
+
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Enabled</span> {
+		<span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Acquire</span>(<span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#a6e22e">m</span>))
+	}
+}
+</code></pre></div><p>当锁被占用，但满足自旋条件时，自旋同时标志<code>woken</code>状态。此后，若占用mutex的goroutine释放锁时，发现<code>woken</code>标志位被标记，直接return，不做唤醒，让自旋的goroutine有更大的机会抢到锁。</p>
+<p><code>if old&amp;(mutexLocked|mutexStarving) == mutexLocked &amp;&amp; runtime_canSpin(iter)</code>：</p>
+<ul>
+<li>锁已被占用，并且锁不处于饥饿模式</li>
+<li>积累的自旋次数小于最大自旋次数（<code>active_spin=4</code>）</li>
+<li>cpu核数大于1</li>
+<li>有空闲的P</li>
+<li>当前goroutine所挂载的P下，本地待运行队列为空</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">if old&gt;&gt;mutexWaiterShift == 0 || old&amp;(mutexLocked|mutexWoken|mutexStarving) != 0 {
+		return
+}
+</code></pre></div><p>来看<code>unlock</code>方法：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">m</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Mutex</span>) <span style="color:#a6e22e">Unlock</span>() {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Enabled</span> {
+		<span style="color:#a6e22e">_</span> = <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>
+		<span style="color:#a6e22e">race</span>.<span style="color:#a6e22e">Release</span>(<span style="color:#a6e22e">unsafe</span>.<span style="color:#a6e22e">Pointer</span>(<span style="color:#a6e22e">m</span>))
+	}
+
+	<span style="color:#75715e">// Fast path: drop lock bit.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">new</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>, <span style="color:#f92672">-</span><span style="color:#a6e22e">mutexLocked</span>)
+	<span style="color:#66d9ef">if</span> (<span style="color:#a6e22e">new</span><span style="color:#f92672">+</span><span style="color:#a6e22e">mutexLocked</span>)<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexLocked</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#75715e">// 不能多次执行unclock()
+</span><span style="color:#75715e"></span>		panic(<span style="color:#e6db74">&#34;sync: unlock of unlocked mutex&#34;</span>)
+	}
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">new</span><span style="color:#f92672">&amp;</span><span style="color:#a6e22e">mutexStarving</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#75715e">// 非饥饿模式
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">old</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">new</span>
+		<span style="color:#66d9ef">for</span> {
+			<span style="color:#75715e">// 没有被阻塞的goroutine。直接返回
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 有阻塞的goroutine，但处于woken模式，直接返回
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 有阻塞的goroutine，但被上锁了。可能发生在此for循环内，第一次CAS不成功。因为CAS前可能被新的goroutine抢到锁。直接返回
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 有阻塞的goroutine，但锁处于饥饿模式。可能发生在被阻塞的goroutine不是被唤醒调度的，而是被正常调度运行的。直接返回
+</span><span style="color:#75715e"></span>			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&gt;&gt;</span><span style="color:#a6e22e">mutexWaiterShift</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">||</span> <span style="color:#a6e22e">old</span><span style="color:#f92672">&amp;</span>(<span style="color:#a6e22e">mutexLocked</span>|<span style="color:#a6e22e">mutexWoken</span>|<span style="color:#a6e22e">mutexStarving</span>) <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> {
+				<span style="color:#66d9ef">return</span>
+			}
+
+			<span style="color:#75715e">// 有阻塞的goroutine，唤醒一个或变为没有阻塞的goroutine了就退出
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 这个被唤醒的goroutine还需要跟新来的goroutine竞争
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 如果只剩最后一个被阻塞的goroutine。唤醒它之后，state就变成0。
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 如果此刻来一个新的goroutine抢锁，它有可能在goroutine被重新调度之前抢锁成功。
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 这样就失去公平性了，不能让它那么干，所以这里也要设置为woken模式。
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// 因为Lock方法开始的fast path，CAS操作的old值是0。这里设置woken模式成功后，后来者就只能乖乖排队。保持了锁的公平性
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">new</span> = (<span style="color:#a6e22e">old</span> <span style="color:#f92672">-</span> <span style="color:#ae81ff">1</span><span style="color:#f92672">&lt;&lt;</span><span style="color:#a6e22e">mutexWaiterShift</span>) | <span style="color:#a6e22e">mutexWoken</span>
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>, <span style="color:#a6e22e">old</span>, <span style="color:#a6e22e">new</span>) {
+				<span style="color:#a6e22e">runtime_Semrelease</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">sema</span>, <span style="color:#66d9ef">false</span>)
+				<span style="color:#66d9ef">return</span>
+			}
+			<span style="color:#a6e22e">old</span> = <span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">state</span>
+		}
+	} <span style="color:#66d9ef">else</span> {
+    <span style="color:#75715e">// 饥饿模式唤醒一个goroutine
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">runtime_Semrelease</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">sema</span>, <span style="color:#66d9ef">true</span>)
+	}
+}
+</code></pre></div><p>释放锁时，检查Woken标记为空。而阻塞队列里有goroutine需要被唤醒。那么在唤醒时，同时标记锁Woken。这里可能有疑问，原来没有Woken标记，为什么在唤醒一个goroutine要主动标记呢？</p>
+<p>考虑这样的场景：现在阻塞队列里只有一个goroutine。把它唤醒后，还得等调度器运行到它，它自己再去抢锁。但在调度器运行到它之前，很可能新的竞争者参与进来，此时锁被抢走的概率就很大。</p>
+<p>这有失公平，被阻塞的goroutine是先到者，新的竞争者是后来者。应该尽量让它们一起竞争。</p>
+<p>设置Woken标记后，state就肯定不为零。此时新来的竞争者，在执行Lock()的fast-path时会失败，接下来就只能乖乖排队了。</p>
+<p>go有三种方式来保证Mutex锁尽量公平：</p>
+<ol>
+<li>在锁释放时，主动设置Woken标记，防止新的竞争者轻易抢到锁。</li>
+<li>竞争者进阻塞队列策略不一样。新的竞争者，抢不到锁，就排在队列尾部。先来竞争者，从队列中被唤醒后，还是抢不到锁，就放在队列头部。</li>
+<li>任何竞争者，被阻塞等待的时间超过指定阀值(1ms)。锁就转为饥饿模式。这时锁释放时会唤醒它们，手递手式把锁资源给它们。别的竞争者（包括新来的）都抢不到。直到把饥饿问题解决掉。</li>
+</ol>
+<h3 id="mutex的阻塞和唤醒机制">Mutex的阻塞和唤醒机制</h3>
+<p>源码中使用的semacquire和semrelease代表的是信号的阻塞和唤醒。</p>
+<p>go的runtime有一个全局变量semtable，它放置了所有的信号量。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-text" data-lang="text">var semtable [semTabSize]struct {
+	root semaRoot
+	pad  [sys.CacheLineSize - unsafe.Sizeof(semaRoot{})]byte
+}
+
+func semacquire1(addr *uint32, lifo bool, profile semaProfileFlags)
+func semrelease1(addr *uint32, handoff bool)
+</code></pre></div><p>每个信号量都由一个变量地址指定。Mutex就是用成员sema的地址。在阻塞时，调用semacquire1，把地址(addr)传给它。如果addr大于1，并且通过CAS减一成功，那就说明获取信号量成功。不用阻塞。否则，semacquire1会在semtable数组中找一个元素和它对应上。每个元素都有一个root，这个root是Treap树。最后addr变成一个树节点，这个树节点，有自己的一个队列，专门放被阻塞的goroutine。这个队列是个双端队列，头尾都可以进。semacquire1把当前goroutine相关元数据放进阻塞队列之后，就挂起了。semrelease1是给addr CAS加一。如果发现当前addr上有阻塞的goroutine时，就取一个出来，唤醒它，让它自己再去semacquire1。这是<code>handoff</code>为false的情况。但<code>handoff</code>为true的话，就尝试手递手地把信号量送给这个goroutine。等于说goroutine不用再自己去抢了，因为自己再去抢有可能抢不到。最后semrelease1会把取出来的这个goroutine挂在当前P的本地待运行队列尾部，等待调度执行。就是这样，在获取不到Mutex锁时，通过信号量来阻塞和唤醒goroutine。</p>
+<h2 id="rwmutex">RWMutex</h2>
+<p>接下来，再来看看golang中对于读写锁<strong>RWMutex</strong>的实现。</p>
+<p>在分析源码之前，我们知道，读写锁与互斥锁有一点不同，它支持多个进程同时读数据，但是当有进程在读操作时，不支持写操作；同时，它支持单个进程进行写操作，当有进程在执行写操作时，不允许进行读操作。</p>
+<p>那么很容易就能联想到通过互斥锁来实现读写锁：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">RWMutex</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">rCount</span> <span style="color:#66d9ef">int32</span>
+	<span style="color:#a6e22e">m</span> <span style="color:#a6e22e">Mutex</span>
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">RLock</span>() {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">rCount</span>, <span style="color:#ae81ff">1</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">1</span> {
+		<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Lock</span>()
+	}
+} 
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">RUnlock</span>() {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">rCount</span>, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Unlock</span>()
+	} 
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">Lock</span>() {
+	<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Lock</span>()
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">Unlock</span>() {
+	<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Unlock</span>()
+}
+</code></pre></div><p>但这也存在缺陷：当场景中，读操作比较多时，很容易导致写操作等待饥渴。即因为读操作之间不会互斥，导致写操作会因为读操作不停的”插队“，而一直处于等待状态。</p>
+<p>那么，让我来看看golang是怎么实现读写锁的。</p>
+<h3 id="rwmutex源码解读">RWMutex源码解读</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#75715e">// If a goroutine holds a RWMutex for reading and another goroutine might
+</span><span style="color:#75715e">// call Lock, no goroutine should expect to be able to acquire a read lock
+</span><span style="color:#75715e">// until the initial read lock is released. In particular, this prohibits
+</span><span style="color:#75715e">// recursive read locking. This is to ensure that the lock eventually becomes
+</span><span style="color:#75715e">// available; a blocked Lock call excludes new readers from acquiring the
+</span><span style="color:#75715e">// lock.
+</span><span style="color:#75715e"></span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">RWMutex</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">w</span>           <span style="color:#a6e22e">Mutex</span>  <span style="color:#75715e">// held if there are pending writers
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">writerSem</span>   <span style="color:#66d9ef">uint32</span> <span style="color:#75715e">// semaphore for writers to wait for completing readers
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">readerSem</span>   <span style="color:#66d9ef">uint32</span> <span style="color:#75715e">// semaphore for readers to wait for completing writers
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">readerCount</span> <span style="color:#66d9ef">int32</span>  <span style="color:#75715e">// number of pending readers
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">readerWait</span>  <span style="color:#66d9ef">int32</span>  <span style="color:#75715e">// number of departing readers
+</span><span style="color:#75715e"></span>}
+</code></pre></div><p>从<strong>RWMutex</strong>的结构体中可以看到，golang的实现中利用到了<strong>Mutex</strong>。同时，也使用到了<code>writeSem</code>和<code>readerSem</code>作为两个信号量处理读写进程之间的关系。最后使用<code>readerCount</code>记录执行中的读进程数，<code>readerWait</code>记录处于阻塞状态的读进程数。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">RLock</span>() {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerCount</span>, <span style="color:#ae81ff">1</span>) &lt; <span style="color:#ae81ff">0</span> {
+		<span style="color:#75715e">// A writer is pending, wait for it.
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">runtime_SemacquireMutex</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerSem</span>, <span style="color:#66d9ef">false</span>, <span style="color:#ae81ff">0</span>)
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">RUnlock</span>() {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">r</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerCount</span>, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>); <span style="color:#a6e22e">r</span> &lt; <span style="color:#ae81ff">0</span> {
+		<span style="color:#75715e">// Outlined slow-path to allow the fast-path to be inlined
+</span><span style="color:#75715e"></span>		<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">rUnlockSlow</span>(<span style="color:#a6e22e">r</span>)
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">rUnlockSlow</span>(<span style="color:#a6e22e">r</span> <span style="color:#66d9ef">int32</span>) {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">r</span><span style="color:#f92672">+</span><span style="color:#ae81ff">1</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">||</span> <span style="color:#a6e22e">r</span><span style="color:#f92672">+</span><span style="color:#ae81ff">1</span> <span style="color:#f92672">==</span> <span style="color:#f92672">-</span><span style="color:#a6e22e">rwmutexMaxReaders</span> {
+		<span style="color:#a6e22e">throw</span>(<span style="color:#e6db74">&#34;sync: RUnlock of unlocked RWMutex&#34;</span>)
+	}
+	<span style="color:#75715e">// A writer is pending.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerWait</span>, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#a6e22e">runtime_Semrelease</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">writerSem</span>, <span style="color:#66d9ef">false</span>, <span style="color:#ae81ff">1</span>)
+	}
+}
+</code></pre></div><p>去除<strong>race detect</strong>相关代码后，可以看到，相比于<strong>Mutex</strong>的实现，<strong>RWMutex</strong>的实现要简单很多。首先来看<code>RLock</code>方法和<code>RUnlock</code>方法，可以看到，当<code>readCount</code>数量小于0的时候，<code>readerSem</code>才会阻塞等待。结合后面的<code>Lock</code>方法可以看到，<code>readCount&lt;0</code>表示的是，当前有写操作被阻塞，为了解决上面提到的写操作等待饥渴问题，后到的读操作必须执行等待。<code>RUnlock</code>首先判断是否存在别的读操作锁，若是，则直接返回；否则，先判断是否重复释放锁，然后再唤醒<code>writerSem</code>等待信号。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">Lock</span>() {
+	<span style="color:#75715e">// First, resolve competition with other writers.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">w</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#75715e">// Announce to readers there is a pending writer.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">r</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerCount</span>, <span style="color:#f92672">-</span><span style="color:#a6e22e">rwmutexMaxReaders</span>) <span style="color:#f92672">+</span> <span style="color:#a6e22e">rwmutexMaxReaders</span>
+	<span style="color:#75715e">// Wait for active readers.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">r</span> <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerWait</span>, <span style="color:#a6e22e">r</span>) <span style="color:#f92672">!=</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#a6e22e">runtime_SemacquireMutex</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">writerSem</span>, <span style="color:#66d9ef">false</span>, <span style="color:#ae81ff">0</span>)
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">rw</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">RWMutex</span>) <span style="color:#a6e22e">Unlock</span>() {
+	<span style="color:#a6e22e">r</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">AddInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerCount</span>, <span style="color:#a6e22e">rwmutexMaxReaders</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">r</span> <span style="color:#f92672">&gt;=</span> <span style="color:#a6e22e">rwmutexMaxReaders</span> {
+		<span style="color:#a6e22e">throw</span>(<span style="color:#e6db74">&#34;sync: Unlock of unlocked RWMutex&#34;</span>)
+	}
+	<span style="color:#75715e">// Unblock blocked readers, if any.
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; int(<span style="color:#a6e22e">r</span>); <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">runtime_Semrelease</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">readerSem</span>, <span style="color:#66d9ef">false</span>, <span style="color:#ae81ff">0</span>)
+	}
+	<span style="color:#75715e">// Allow other writers to proceed.
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">rw</span>.<span style="color:#a6e22e">w</span>.<span style="color:#a6e22e">Unlock</span>()
+}
+</code></pre></div><p>继续看<code>Lock</code>和<code>Unlock</code>的实现。<code>Lock</code>的时候先上锁，然后再给<code>readerCount</code>赋负值，标记当前有<code>writer</code>处于等待，如果当前有读操作，那么等待<code>writerSem</code>的释放，否则，直接返回（占用锁成功）。<code>Unlock</code>的时候，先将<code>readerCount</code>还原，然后判断该锁是否被重复释放。接下来就将所有被阻塞的<code>readerSem</code>唤醒，最后再释放锁。</p>
+<h3 id="简单总结">简单总结</h3>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#75715e">//reader到来，前面有writer
+</span><span style="color:#75715e"></span><span style="color:#a6e22e">RLock</span>()
+    <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">writer</span> <span style="color:#a6e22e">exist</span>:
+        <span style="color:#a6e22e">wait</span>(<span style="color:#a6e22e">readerSem</span>)
+
+<span style="color:#a6e22e">Unlock</span>()
+    <span style="color:#a6e22e">signal</span>(<span style="color:#a6e22e">readerSem</span>)
+
+<span style="color:#75715e">//writer到来，前面有reader
+</span><span style="color:#75715e"></span><span style="color:#a6e22e">Lock</span>()
+    <span style="color:#66d9ef">if</span> <span style="color:#a6e22e">reader</span> <span style="color:#a6e22e">exist</span>:
+        <span style="color:#a6e22e">wait</span>(<span style="color:#a6e22e">writerSem</span>)
+
+<span style="color:#a6e22e">RUnlock</span>()
+    <span style="color:#a6e22e">signal</span>(<span style="color:#a6e22e">writerSem</span>)
+</code></pre></div><p>不得不说golang的读写锁实现非常巧妙。</p>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>
