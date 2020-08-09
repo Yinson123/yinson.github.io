@@ -99,7 +99,7 @@
     <span style="color:#a6e22e">mutexWaiterShift</span> = <span style="color:#66d9ef">iota</span>
 )
 </code></pre></div><p>可以看到golang中<code>Mutex</code>结构体的定义很简单，一个表示状态的成员<code>state</code>和一个表示信号量的成员<code>sema</code>。<code>state</code>变量被划分成4个部分：<code>mutexLock</code>，<code>mutextWoken</code>， <code>mutexStarving</code>和当前被阻塞的goroutine数量。</p>
-<p><img src="../../mutex-state.png" alt=""></p>
+<p><img src="../../img/mutex-state.png" alt=""></p>
 <p>含义如下：</p>
 <ul>
 <li><code>mutexLocked</code> 对应右边低位第一个bit。值为1，表示锁被占用。值为0，表示锁未被占用</li>
