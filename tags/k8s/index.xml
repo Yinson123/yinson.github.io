@@ -5,10 +5,19 @@
     <link>https://yinson123.github.io/tags/k8s/</link>
     <description>Recent content in k8s on 静夜思</description>
     <generator>Hugo -- gohugo.io</generator>
-    <lastBuildDate>Sun, 02 Aug 2020 10:31:11 +0800</lastBuildDate>
+    <lastBuildDate>Sun, 16 Aug 2020 16:31:11 +0800</lastBuildDate>
     
 	<atom:link href="https://yinson123.github.io/tags/k8s/index.xml" rel="self" type="application/rss+xml" />
     
+    
+    <item>
+      <title>kubernetes源码分析之informer(下篇)</title>
+      <link>https://yinson123.github.io/post/informerii/</link>
+      <pubDate>Sun, 16 Aug 2020 16:31:11 +0800</pubDate>
+      
+      <guid>https://yinson123.github.io/post/informerii/</guid>
+      <description>k8s组件中常见的informer分析</description>
+    </item>
     
     <item>
       <title>kubernetes源码分析之informer(上篇)</title>

@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>kubernetes源码分析之informer(下篇) &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>kubernetes源码分析之informer(下篇)</h1>
+  <time datetime=2020-08-16T16:31:11&#43;0800 class="post-date">Sun, Aug 16, 2020</time>
+  <p>之前我们基于informer的源码实现，来分析了一下informer的架构，自底向上，比较抽象。本篇将会利用kubernetes官方提供的<a href="https://github.com/kubernetes/sample-controller">sample-controller</a>来谈谈，informer在具体案例中是怎么被使用到的。之所以选择sample-controller，是因为其本身实现比较简单，非常适合初学者当作理解informer架构的入口。当然，由于kubernetes本身较多的组件(如kube-controller)都有使用到client-go中的informer，对于想深入了解kubernetes的同学，也可以直接深入探究kubernetes中的使用。</p>
+<h2 id="回顾">回顾</h2>
+<p>在<a href="https://yinson123.github.io/post/informer/">kubernetes源码分析之informer(上篇)</a>中我们提到，informer是通过<code>reflector</code>对<code>apiserver</code>进行<strong>List&amp;Watch</strong>，并将待观察的对象保存到<code>DeltaFIFO</code>队列中，交给<code>informer</code>进行处理。<code>informer</code>再将<code>DelataFIFO</code>队列中的事件交给<code>indexer</code>持久化保存到本地的缓存中。</p>
+<h2 id="controller">controller</h2>
+<p><img src="../../img/informer-controller.jpeg" alt=""></p>
+<p>细心的读者或许发现，其实<a href="https://yinson123.github.io/post/informer/">kubernetes源码分析之informer(上篇)</a>中出现的图恰好是本图的上半部分。上篇中也仅仅是分析了上半部分的informer结构。本篇将从controller实现上分析informer结构的优势。</p>
+<p>首先还是一样从主函数开始：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang">	<span style="color:#a6e22e">klog</span>.<span style="color:#a6e22e">InitFlags</span>(<span style="color:#66d9ef">nil</span>)
+	<span style="color:#a6e22e">flag</span>.<span style="color:#a6e22e">Parse</span>()
+
+	<span style="color:#a6e22e">stopCh</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">signals</span>.<span style="color:#a6e22e">SetupSignalHandler</span>()
+
+	<span style="color:#a6e22e">cfg</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">clientcmd</span>.<span style="color:#a6e22e">BuildConfigFromFlags</span>(<span style="color:#a6e22e">masterURL</span>, <span style="color:#a6e22e">kubeconfig</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">klog</span>.<span style="color:#a6e22e">Fatalf</span>(<span style="color:#e6db74">&#34;Error building kubeconfig: %s&#34;</span>, <span style="color:#a6e22e">err</span>.<span style="color:#a6e22e">Error</span>())
+	}
+
+	<span style="color:#a6e22e">kubeClient</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">kubernetes</span>.<span style="color:#a6e22e">NewForConfig</span>(<span style="color:#a6e22e">cfg</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">klog</span>.<span style="color:#a6e22e">Fatalf</span>(<span style="color:#e6db74">&#34;Error building kubernetes clientset: %s&#34;</span>, <span style="color:#a6e22e">err</span>.<span style="color:#a6e22e">Error</span>())
+	}
+
+	<span style="color:#a6e22e">exampleClient</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">clientset</span>.<span style="color:#a6e22e">NewForConfig</span>(<span style="color:#a6e22e">cfg</span>)
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">klog</span>.<span style="color:#a6e22e">Fatalf</span>(<span style="color:#e6db74">&#34;Error building example clientset: %s&#34;</span>, <span style="color:#a6e22e">err</span>.<span style="color:#a6e22e">Error</span>())
+	}
+
+	<span style="color:#a6e22e">kubeInformerFactory</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">kubeinformers</span>.<span style="color:#a6e22e">NewSharedInformerFactory</span>(<span style="color:#a6e22e">kubeClient</span>, <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span><span style="color:#f92672">*</span><span style="color:#ae81ff">30</span>)
+	<span style="color:#a6e22e">exampleInformerFactory</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">informers</span>.<span style="color:#a6e22e">NewSharedInformerFactory</span>(<span style="color:#a6e22e">exampleClient</span>, <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span><span style="color:#f92672">*</span><span style="color:#ae81ff">30</span>)
+
+	<span style="color:#a6e22e">controller</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">NewController</span>(<span style="color:#a6e22e">kubeClient</span>, <span style="color:#a6e22e">exampleClient</span>,
+		<span style="color:#a6e22e">kubeInformerFactory</span>.<span style="color:#a6e22e">Apps</span>().<span style="color:#a6e22e">V1</span>().<span style="color:#a6e22e">Deployments</span>(),
+		<span style="color:#a6e22e">exampleInformerFactory</span>.<span style="color:#a6e22e">Samplecontroller</span>().<span style="color:#a6e22e">V1alpha1</span>().<span style="color:#a6e22e">Foos</span>())
+
+	<span style="color:#a6e22e">kubeInformerFactory</span>.<span style="color:#a6e22e">Start</span>(<span style="color:#a6e22e">stopCh</span>)
+	<span style="color:#a6e22e">exampleInformerFactory</span>.<span style="color:#a6e22e">Start</span>(<span style="color:#a6e22e">stopCh</span>)
+
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> = <span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">Run</span>(<span style="color:#ae81ff">2</span>, <span style="color:#a6e22e">stopCh</span>); <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+		<span style="color:#a6e22e">klog</span>.<span style="color:#a6e22e">Fatalf</span>(<span style="color:#e6db74">&#34;Error running controller: %s&#34;</span>, <span style="color:#a6e22e">err</span>.<span style="color:#a6e22e">Error</span>())
+	}
+</code></pre></div><p>逻辑还是很清晰：</p>
+<ul>
+<li>
+<p>解析传入参数，并赋值给<code>kubeconfig</code>和<code>masterURL</code>变量</p>
+</li>
+<li>
+<p>设置<code>kubeClient</code>和<code>exampleClient</code>两个变量，在后续新建<code>kubeInformerFactory</code>和<code>exampleInformerFactory</code>两个informer时作为入参传入</p>
+</li>
+<li>
+<p>新建两个informer：<code>kubeInformerFactory</code>和<code>exampleInformerFactory</code>。分别对k8s原生资源和CRD资源进行<strong>List&amp;Watch</strong>，<code>NewSharedInformerFactory</code>方法第二个入参代表重新对<code>etcd</code>中对应的资源对象执行<strong>list</strong>操作的时间，一般都设置为0或者较大的值</p>
+</li>
+<li>
+<p>新建<code>controller</code>对象，对informer中<strong>List&amp;Watch</strong>的对象进行处理</p>
+</li>
+<li>
+<p>启动<code>informer</code>和<code>controller</code></p>
+</li>
+</ul>
+<p>详细看实现逻辑：</p>
+<ul>
+<li><code>NewSharedInformerFactory</code>：生成<code>informer</code>工厂，定义对不同资源进行<strong>List&amp;Watch</strong>的<code>informer</code>。这里，我们可以看到并没有对<code>informer</code>进行赋值，后面会提到。</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewSharedInformerFactory</span>(<span style="color:#a6e22e">client</span> <span style="color:#a6e22e">kubernetes</span>.<span style="color:#a6e22e">Interface</span>, <span style="color:#a6e22e">defaultResync</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>) <span style="color:#a6e22e">SharedInformerFactory</span> {
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">NewSharedInformerFactoryWithOptions</span>(<span style="color:#a6e22e">client</span>, <span style="color:#a6e22e">defaultResync</span>)
+}
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewSharedInformerFactoryWithOptions</span>(<span style="color:#a6e22e">client</span> <span style="color:#a6e22e">kubernetes</span>.<span style="color:#a6e22e">Interface</span>, <span style="color:#a6e22e">defaultResync</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>, <span style="color:#a6e22e">options</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">SharedInformerOption</span>) <span style="color:#a6e22e">SharedInformerFactory</span> {
+	<span style="color:#a6e22e">factory</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">sharedInformerFactory</span>{
+		<span style="color:#a6e22e">client</span>:           <span style="color:#a6e22e">client</span>,
+		<span style="color:#a6e22e">namespace</span>:        <span style="color:#a6e22e">v1</span>.<span style="color:#a6e22e">NamespaceAll</span>,
+		<span style="color:#a6e22e">defaultResync</span>:    <span style="color:#a6e22e">defaultResync</span>,
+		<span style="color:#a6e22e">informers</span>:        make(<span style="color:#66d9ef">map</span>[<span style="color:#a6e22e">reflect</span>.<span style="color:#a6e22e">Type</span>]<span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">SharedIndexInformer</span>),
+		<span style="color:#a6e22e">startedInformers</span>: make(<span style="color:#66d9ef">map</span>[<span style="color:#a6e22e">reflect</span>.<span style="color:#a6e22e">Type</span>]<span style="color:#66d9ef">bool</span>),
+		<span style="color:#a6e22e">customResync</span>:     make(<span style="color:#66d9ef">map</span>[<span style="color:#a6e22e">reflect</span>.<span style="color:#a6e22e">Type</span>]<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>),
+	}
+
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">opt</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">options</span> {
+		<span style="color:#a6e22e">factory</span> = <span style="color:#a6e22e">opt</span>(<span style="color:#a6e22e">factory</span>)
+	}
+
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">factory</span>
+}
+</code></pre></div><ul>
+<li><code>NewController</code>：新建<code>controller</code>对象，定义watch到资源变化时，执行的方法<code>EventHandler</code>。在这里，对于<code>fooInformer</code>和<code>deploymentInformer</code>分别定义了<code>AddFunc</code>，<code>UpdateFunc</code>和<code>AddFunc</code>，<code>UpdateFunc</code>和<code>DeleteFunc</code>。</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewController</span>(
+	<span style="color:#a6e22e">kubeclientset</span> <span style="color:#a6e22e">kubernetes</span>.<span style="color:#a6e22e">Interface</span>,
+	<span style="color:#a6e22e">sampleclientset</span> <span style="color:#a6e22e">clientset</span>.<span style="color:#a6e22e">Interface</span>,
+	<span style="color:#a6e22e">deploymentInformer</span> <span style="color:#a6e22e">appsinformers</span>.<span style="color:#a6e22e">DeploymentInformer</span>,
+	<span style="color:#a6e22e">fooInformer</span> <span style="color:#a6e22e">informers</span>.<span style="color:#a6e22e">FooInformer</span>) <span style="color:#f92672">*</span><span style="color:#a6e22e">Controller</span> {
+	<span style="color:#75715e">// ...
+</span><span style="color:#75715e"></span>
+	<span style="color:#a6e22e">controller</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">Controller</span>{
+		<span style="color:#a6e22e">kubeclientset</span>:     <span style="color:#a6e22e">kubeclientset</span>,
+		<span style="color:#a6e22e">sampleclientset</span>:   <span style="color:#a6e22e">sampleclientset</span>,
+		<span style="color:#a6e22e">deploymentsLister</span>: <span style="color:#a6e22e">deploymentInformer</span>.<span style="color:#a6e22e">Lister</span>(),
+		<span style="color:#a6e22e">deploymentsSynced</span>: <span style="color:#a6e22e">deploymentInformer</span>.<span style="color:#a6e22e">Informer</span>().<span style="color:#a6e22e">HasSynced</span>,
+		<span style="color:#a6e22e">foosLister</span>:        <span style="color:#a6e22e">fooInformer</span>.<span style="color:#a6e22e">Lister</span>(),
+		<span style="color:#a6e22e">foosSynced</span>:        <span style="color:#a6e22e">fooInformer</span>.<span style="color:#a6e22e">Informer</span>().<span style="color:#a6e22e">HasSynced</span>,
+		<span style="color:#a6e22e">workqueue</span>:         <span style="color:#a6e22e">workqueue</span>.<span style="color:#a6e22e">NewNamedRateLimitingQueue</span>(<span style="color:#a6e22e">workqueue</span>.<span style="color:#a6e22e">DefaultControllerRateLimiter</span>(), <span style="color:#e6db74">&#34;Foos&#34;</span>),
+		<span style="color:#a6e22e">recorder</span>:          <span style="color:#a6e22e">recorder</span>,
+	}
+	
+	<span style="color:#a6e22e">fooInformer</span>.<span style="color:#a6e22e">Informer</span>().<span style="color:#a6e22e">AddEventHandler</span>(<span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">ResourceEventHandlerFuncs</span>{
+		<span style="color:#a6e22e">AddFunc</span>: <span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">enqueueFoo</span>,
+		<span style="color:#a6e22e">UpdateFunc</span>: <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">old</span>, <span style="color:#a6e22e">new</span> <span style="color:#66d9ef">interface</span>{}) {
+			<span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">enqueueFoo</span>(<span style="color:#a6e22e">new</span>)
+		},
+	})
+	
+	<span style="color:#a6e22e">deploymentInformer</span>.<span style="color:#a6e22e">Informer</span>().<span style="color:#a6e22e">AddEventHandler</span>(<span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">ResourceEventHandlerFuncs</span>{
+		<span style="color:#a6e22e">AddFunc</span>: <span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">handleObject</span>,
+		<span style="color:#a6e22e">UpdateFunc</span>: <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">old</span>, <span style="color:#a6e22e">new</span> <span style="color:#66d9ef">interface</span>{}) {
+			<span style="color:#a6e22e">newDepl</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">new</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">appsv1</span>.<span style="color:#a6e22e">Deployment</span>)
+			<span style="color:#a6e22e">oldDepl</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">old</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">appsv1</span>.<span style="color:#a6e22e">Deployment</span>)
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">newDepl</span>.<span style="color:#a6e22e">ResourceVersion</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">oldDepl</span>.<span style="color:#a6e22e">ResourceVersion</span> {
+				<span style="color:#66d9ef">return</span>
+			}
+			<span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">handleObject</span>(<span style="color:#a6e22e">new</span>)
+		},
+		<span style="color:#a6e22e">DeleteFunc</span>: <span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">handleObject</span>,
+	})
+
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">controller</span>
+}
+</code></pre></div><p>上文中提到的<code>informer</code>正是通过<code>deploymentInformer.Lister()</code>和<code>fooInformer.Lister()</code>在这里被赋值。以<code>deploymentInformer.Informer</code>为例：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">f</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">deploymentInformer</span>) <span style="color:#a6e22e">Informer</span>() <span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">SharedIndexInformer</span> {
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">factory</span>.<span style="color:#a6e22e">InformerFor</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">appsv1</span>.<span style="color:#a6e22e">Deployment</span>{}, <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">defaultInformer</span>)
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">f</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">deploymentInformer</span>) <span style="color:#a6e22e">Lister</span>() <span style="color:#a6e22e">v1</span>.<span style="color:#a6e22e">DeploymentLister</span> {
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">v1</span>.<span style="color:#a6e22e">NewDeploymentLister</span>(<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">Informer</span>().<span style="color:#a6e22e">GetIndexer</span>())
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">f</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sharedInformerFactory</span>) <span style="color:#a6e22e">InformerFor</span>(<span style="color:#a6e22e">obj</span> <span style="color:#a6e22e">runtime</span>.<span style="color:#a6e22e">Object</span>, <span style="color:#a6e22e">newFunc</span> <span style="color:#a6e22e">internalinterfaces</span>.<span style="color:#a6e22e">NewInformerFunc</span>) <span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">SharedIndexInformer</span> {
+	<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">lock</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">lock</span>.<span style="color:#a6e22e">Unlock</span>()
+
+	<span style="color:#a6e22e">informerType</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">reflect</span>.<span style="color:#a6e22e">TypeOf</span>(<span style="color:#a6e22e">obj</span>)
+	<span style="color:#a6e22e">informer</span>, <span style="color:#a6e22e">exists</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">informers</span>[<span style="color:#a6e22e">informerType</span>]
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">exists</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">informer</span>
+	}
+
+	<span style="color:#a6e22e">resyncPeriod</span>, <span style="color:#a6e22e">exists</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">customResync</span>[<span style="color:#a6e22e">informerType</span>]
+	<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">exists</span> {
+		<span style="color:#a6e22e">resyncPeriod</span> = <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">defaultResync</span>
+	}
+
+	<span style="color:#a6e22e">informer</span> = <span style="color:#a6e22e">newFunc</span>(<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">client</span>, <span style="color:#a6e22e">resyncPeriod</span>)
+	<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">informers</span>[<span style="color:#a6e22e">informerType</span>] = <span style="color:#a6e22e">informer</span>
+
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">informer</span>
+}
+</code></pre></div><p><code>InformerFor</code>方法中，当<code>Deployment</code>资源对应的<code>informer</code>对象不存在与<code>informerFactory</code>中时，执行实例化，生成对应的informer对象。不妨以<code>deploymentInformer</code>为例，细看其中的实现。</p>
+<p>首先，在执行<code>NewController</code>函数时，传入了<code>kubeInformerFactory.Apps().V1().Deployments()</code>变量作为<code>deploymentInformer</code>的入参。那么在调用<code>Informer</code>方法实例化<code>informer</code>对象时，执行<code>newFunc</code>便是<code>kubeInformerFactory.Apps().V1().Deployments()</code>。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewFilteredDeploymentInformer</span>(<span style="color:#a6e22e">client</span> <span style="color:#a6e22e">kubernetes</span>.<span style="color:#a6e22e">Interface</span>, <span style="color:#a6e22e">namespace</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">resyncPeriod</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>, <span style="color:#a6e22e">indexers</span> <span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">Indexers</span>, <span style="color:#a6e22e">tweakListOptions</span> <span style="color:#a6e22e">internalinterfaces</span>.<span style="color:#a6e22e">TweakListOptionsFunc</span>) <span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">SharedIndexInformer</span> {
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">NewSharedIndexInformer</span>(
+		<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">cache</span>.<span style="color:#a6e22e">ListWatch</span>{
+			<span style="color:#a6e22e">ListFunc</span>: <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">options</span> <span style="color:#a6e22e">metav1</span>.<span style="color:#a6e22e">ListOptions</span>) (<span style="color:#a6e22e">runtime</span>.<span style="color:#a6e22e">Object</span>, <span style="color:#66d9ef">error</span>) {
+				<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">tweakListOptions</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+					<span style="color:#a6e22e">tweakListOptions</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">options</span>)
+				}
+				<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">client</span>.<span style="color:#a6e22e">AppsV1</span>().<span style="color:#a6e22e">Deployments</span>(<span style="color:#a6e22e">namespace</span>).<span style="color:#a6e22e">List</span>(<span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">TODO</span>(), <span style="color:#a6e22e">options</span>)
+			},
+			<span style="color:#a6e22e">WatchFunc</span>: <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">options</span> <span style="color:#a6e22e">metav1</span>.<span style="color:#a6e22e">ListOptions</span>) (<span style="color:#a6e22e">watch</span>.<span style="color:#a6e22e">Interface</span>, <span style="color:#66d9ef">error</span>) {
+				<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">tweakListOptions</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+					<span style="color:#a6e22e">tweakListOptions</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">options</span>)
+				}
+				<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">client</span>.<span style="color:#a6e22e">AppsV1</span>().<span style="color:#a6e22e">Deployments</span>(<span style="color:#a6e22e">namespace</span>).<span style="color:#a6e22e">Watch</span>(<span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">TODO</span>(), <span style="color:#a6e22e">options</span>)
+			},
+		},
+		<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">appsv1</span>.<span style="color:#a6e22e">Deployment</span>{},
+		<span style="color:#a6e22e">resyncPeriod</span>,
+		<span style="color:#a6e22e">indexers</span>,
+	)
+}
+</code></pre></div><p>可以看到list和watch对应的方法都是在<code>informer</code>对象实例化时，被定义的。</p>
+<p>至于<code>controller</code>对象中的细节，类似于具有流控能力的<code>workqueue</code>等对象，都是为<code>EventHandler</code>方法服务的。实现的细节就不在此赘述。感兴趣的同学，可以自己深入了解。</p>
+<ul>
+<li><code>kubeInformerFactory.Start</code>和<code>exampleInformerFactory.Start</code>：分别启动两个informer工厂实例。在这个例子中，分别对<code>Deployments</code>和<code>Foos</code>资源进行监控和处理。还是以<code>kubeInformerFactory.Start()</code>为例:</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">f</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sharedInformerFactory</span>) <span style="color:#a6e22e">Start</span>(<span style="color:#a6e22e">stopCh</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">struct</span>{}) {
+	<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">lock</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">lock</span>.<span style="color:#a6e22e">Unlock</span>()
+
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">informerType</span>, <span style="color:#a6e22e">informer</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">informers</span> {
+		<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">startedInformers</span>[<span style="color:#a6e22e">informerType</span>] {
+			<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">informer</span>.<span style="color:#a6e22e">Run</span>(<span style="color:#a6e22e">stopCh</span>)
+			<span style="color:#a6e22e">f</span>.<span style="color:#a6e22e">startedInformers</span>[<span style="color:#a6e22e">informerType</span>] = <span style="color:#66d9ef">true</span>
+		}
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">s</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sharedIndexInformer</span>) <span style="color:#a6e22e">Run</span>(<span style="color:#a6e22e">stopCh</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">struct</span>{}) {
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">utilruntime</span>.<span style="color:#a6e22e">HandleCrash</span>()
+
+	<span style="color:#a6e22e">fifo</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">NewDeltaFIFOWithOptions</span>(<span style="color:#a6e22e">DeltaFIFOOptions</span>{
+		<span style="color:#a6e22e">KnownObjects</span>:          <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">indexer</span>,
+		<span style="color:#a6e22e">EmitDeltaTypeReplaced</span>: <span style="color:#66d9ef">true</span>,
+	})
+
+	<span style="color:#a6e22e">cfg</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">Config</span>{
+		<span style="color:#a6e22e">Queue</span>:            <span style="color:#a6e22e">fifo</span>,
+		<span style="color:#a6e22e">ListerWatcher</span>:    <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">listerWatcher</span>,
+		<span style="color:#a6e22e">ObjectType</span>:       <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">objectType</span>,
+		<span style="color:#a6e22e">FullResyncPeriod</span>: <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">resyncCheckPeriod</span>,
+		<span style="color:#a6e22e">RetryOnError</span>:     <span style="color:#66d9ef">false</span>,
+		<span style="color:#a6e22e">ShouldResync</span>:     <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">processor</span>.<span style="color:#a6e22e">shouldResync</span>,
+
+		<span style="color:#a6e22e">Process</span>:           <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">HandleDeltas</span>,
+		<span style="color:#a6e22e">WatchErrorHandler</span>: <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">watchErrorHandler</span>,
+	}
+
+	<span style="color:#66d9ef">func</span>() {
+		<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">startedLock</span>.<span style="color:#a6e22e">Lock</span>()
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">startedLock</span>.<span style="color:#a6e22e">Unlock</span>()
+
+		<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">controller</span> = <span style="color:#a6e22e">New</span>(<span style="color:#a6e22e">cfg</span>)
+		<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">controller</span>.(<span style="color:#f92672">*</span><span style="color:#a6e22e">controller</span>).<span style="color:#a6e22e">clock</span> = <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">clock</span>
+		<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">started</span> = <span style="color:#66d9ef">true</span>
+	}()
+
+	<span style="color:#75715e">// Separate stop channel because Processor should be stopped strictly after controller
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">processorStopCh</span> <span style="color:#f92672">:=</span> make(<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">struct</span>{})
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">wg</span> <span style="color:#a6e22e">wait</span>.<span style="color:#a6e22e">Group</span>
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()              <span style="color:#75715e">// Wait for Processor to stop
+</span><span style="color:#75715e"></span>	<span style="color:#66d9ef">defer</span> close(<span style="color:#a6e22e">processorStopCh</span>) <span style="color:#75715e">// Tell Processor to stop
+</span><span style="color:#75715e"></span>	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">StartWithChannel</span>(<span style="color:#a6e22e">processorStopCh</span>, <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">cacheMutationDetector</span>.<span style="color:#a6e22e">Run</span>)
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">StartWithChannel</span>(<span style="color:#a6e22e">processorStopCh</span>, <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">processor</span>.<span style="color:#a6e22e">run</span>)
+
+	<span style="color:#66d9ef">defer</span> <span style="color:#66d9ef">func</span>() {
+		<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">startedLock</span>.<span style="color:#a6e22e">Lock</span>()
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">startedLock</span>.<span style="color:#a6e22e">Unlock</span>()
+		<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">stopped</span> = <span style="color:#66d9ef">true</span> <span style="color:#75715e">// Don&#39;t want any new listeners
+</span><span style="color:#75715e"></span>	}()
+	<span style="color:#a6e22e">s</span>.<span style="color:#a6e22e">controller</span>.<span style="color:#a6e22e">Run</span>(<span style="color:#a6e22e">stopCh</span>)
+}
+</code></pre></div><p>在这里执行了<a href="https://yinson123.github.io/post/informer/">kubernetes源码分析之informer(上篇)</a>中提到的<code>informer</code>的<code>Run</code>方法。</p>
+<ul>
+<li><code>controller.Run</code>启动<code>controller</code>对<code>deployment</code>资源和<code>foo(自定义的CRD)</code>资源进行处理。这里主要是对<code>EventHandler</code>中处理完后放入<code>workqueque</code>中的object做处理。</li>
+</ul>
+<h2 id="最后">最后</h2>
+<p>可以看到，基于<code>informer</code>定义<code>sample-controller</code>实现对特点资源的读写操作非常方便。用户甚至无需对底层过于关系，只需要实现<code>informerFactory</code>，注册对应的<code>EventHandler</code>方法，启动<code>informer</code>和<code>controller</code>即可。当我们对<code>controller</code>中执行对应<code>Lister</code>对象的<code>Get</code>和<code>List</code>方法，其实都是对于<code>informer</code>结构中的<code>localStorage</code>对象执行查询，并不会对<code>apiserver</code>执行查询操作；而执行<code>create</code>方法时，往往是直接通过<code>clientSet</code>调用<code>apiserver</code>接口创建对象。</p>
+<p>由于篇幅的限制，对<code>informer</code>中很多的实现细节，没有过多的深入。有时间的话，后续文章会做分析。<code>client-go</code>中的代码实现特别优雅，甚至有炫技的嫌疑。不得不说，<code>informer</code>的实现非常的巧妙，架构设计非常优秀。</p>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>
