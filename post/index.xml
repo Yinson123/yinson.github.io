@@ -65,6 +65,15 @@
     </item>
     
     <item>
+      <title>简单goroutine-pool实现</title>
+      <link>https://yinson123.github.io/post/goroutine-pool/</link>
+      <pubDate>Sun, 05 Jul 2020 10:31:11 +0800</pubDate>
+      
+      <guid>https://yinson123.github.io/post/goroutine-pool/</guid>
+      <description>简单goroutine pool实现</description>
+    </item>
+    
+    <item>
       <title>感想</title>
       <link>https://yinson123.github.io/post/thought/</link>
       <pubDate>Fri, 26 Jun 2020 12:08:26 +0800</pubDate>
