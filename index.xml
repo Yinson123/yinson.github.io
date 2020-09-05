@@ -29,6 +29,15 @@
     </item>
     
     <item>
+      <title>go context使用</title>
+      <link>https://yinson123.github.io/post/go-context/</link>
+      <pubDate>Sat, 25 Jul 2020 10:31:11 +0800</pubDate>
+      
+      <guid>https://yinson123.github.io/post/go-context/</guid>
+      <description>goroutine并发控制与通信</description>
+    </item>
+    
+    <item>
       <title>golang源码解读之互斥锁和读写锁</title>
       <link>https://yinson123.github.io/post/mutex-and-rwmutex/</link>
       <pubDate>Sun, 19 Jul 2020 19:31:11 +0800</pubDate>

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>go context使用 &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>go context使用</h1>
+  <time datetime=2020-07-25T10:31:11&#43;0800 class="post-date">Sat, Jul 25, 2020</time>
+  <p>开发golang程序时，避免不了使用goroutine处理并发任务的场景。有时候，这些goroutine相互独立，但更多的时候，goroutine之间需要同步与通信。</p>
+<p>通常，我们采用以下三种方式来实现goroutine之间的通信：</p>
+<ul>
+<li>
+<p>全局变量</p>
+</li>
+<li>
+<p>依赖channel</p>
+</li>
+<li>
+<p>使用context包</p>
+</li>
+</ul>
+<h2 id="全局变量">全局变量</h2>
+<p>最简单的控制方式，所有goroutine定期轮询检查变量是否更新，检查到参数更新，执行相应操作：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">stop</span> <span style="color:#66d9ef">int32</span> = <span style="color:#ae81ff">0</span>
+	<span style="color:#a6e22e">wg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>{}
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#ae81ff">3</span>; <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">1</span>)
+		<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">wg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>) {
+			<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+			<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">LoadInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">stop</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;sub goroutine running...&#34;</span>)
+				<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+			}
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;sub goroutine exit...&#34;</span>)
+		}(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">wg</span>)
+	}
+	<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#ae81ff">2</span><span style="color:#f92672">*</span><span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+	<span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">CompareAndSwapInt32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">stop</span>, <span style="color:#ae81ff">0</span>, <span style="color:#ae81ff">1</span>)
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;main goroutine exit...&#34;</span>)
+}
+</code></pre></div><p>对于简单的程序逻辑而言，全局变量的方式操作简单。但是其局限性也很明显：所有go routine入参都相同，全局变量传递的信息有限。对于复杂的程序而言，逻辑一旦复杂全局变量的方式就显得力不从心。</p>
+<h2 id="依赖channel">依赖channel</h2>
+<p>golang推崇channel进行goroutine通信（<strong>CSP模型</strong>）。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#a6e22e">ch</span> <span style="color:#f92672">:=</span> make(<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">struct</span>{})
+	<span style="color:#a6e22e">wg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>{}
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#ae81ff">3</span>; <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">1</span>)
+		<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">stop</span> <span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">struct</span>{}, <span style="color:#a6e22e">wg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>) {
+			<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+			<span style="color:#66d9ef">for</span> {
+				<span style="color:#66d9ef">select</span> {
+				<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span> <span style="color:#a6e22e">stop</span>:
+					<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;sub goroutine exit...&#34;</span>)
+					<span style="color:#66d9ef">return</span>
+				<span style="color:#66d9ef">default</span>:
+					<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;sub goroutine running...&#34;</span>)
+					<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+				}
+			}
+		}(<span style="color:#a6e22e">ch</span>, <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">wg</span>)
+	}
+	<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#ae81ff">2</span><span style="color:#f92672">*</span><span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+	close(<span style="color:#a6e22e">ch</span>)
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;main goroutine exit...&#34;</span>)
+}
+</code></pre></div><p>与全局变量的实现类似，仅仅是把对全局变量的轮询改成了对channel的监听。但是因为channel本身可以传递信息且并发安全，所以相比全局变量的实现方式，采用channel能更优雅的实现goroutine的通信。</p>
+<h2 id="使用context包">使用context包</h2>
+<p>该方式是本文讲解的重点。</p>
+<blockquote>
+<p>Context通常被译作上下文，它是一个比较抽象的概念。在讨论链式调用技术时也经常会提到上下文。一般理解为程序单元的一个运行状态、现场、快照，而翻译中上下又很好地诠释了其本质，上下则是存在上下层的传递，上会把内容传递给下。在Go语言中，程序单元也就指的是Goroutine。</p>
+</blockquote>
+<blockquote>
+<p>每个Goroutine在执行之前，都要先知道程序当前的执行状态，通常将这些执行状态封装在一个Context变量中，传递给要执行的Goroutine中。上下文则几乎已经成为传递与请求同生存周期变量的标准方法。在网络编程下，当接收到一个网络请求Request，在处理这个Request的goroutine中，可能需要在当前gorutine继续开启多个新的Goroutine来获取数据与逻辑处理（例如访问数据库、RPC服务等），即一个请求Request，会需要多个Goroutine中处理。而这些Goroutine可能需要共享Request的一些信息；同时当Request被取消或者超时的时候，所有从这个Request创建的所有Goroutine也应该被结束。</p>
+</blockquote>
+<p><a href="https://github.com/golang/go/blob/df2999ef43ea49ce1578137017949c0ee660608a/src/context/context.go#L62-L154"><code>context.Context</code></a> 是 Go 语言在 1.7 版本中引入标准库的接口，该接口定义了四个需要实现的方法，其中包括：</p>
+<ul>
+<li>
+<p><code>Deadline</code>：返回 <a href="https://github.com/golang/go/blob/df2999ef43ea49ce1578137017949c0ee660608a/src/context/context.go#L62-L154"><code>context.Context</code></a>被取消的时间，也就是完成工作的截止时间</p>
+</li>
+<li>
+<p><code>Done</code>：返回一个channel，这个channel会在当前工作完成或者上下文被取消后关闭</p>
+</li>
+<li>
+<p><code>Err</code>：返回<a href="https://github.com/golang/go/blob/df2999ef43ea49ce1578137017949c0ee660608a/src/context/context.go#L62-L154"><code>context.Context</code></a> 结束的原因。它只会在 <code>Done</code>返回的channel被关闭时返回非空的值</p>
+<ol>
+<li>如果 <a href="https://github.com/golang/go/blob/df2999ef43ea49ce1578137017949c0ee660608a/src/context/context.go#L62-L154"><code>context.Context</code></a> 被取消，会返回 <code>Canceled</code> 错误；</li>
+<li>如果 <a href="https://github.com/golang/go/blob/df2999ef43ea49ce1578137017949c0ee660608a/src/context/context.go#L62-L154"><code>context.Context</code></a> 超时，会返回 <code>DeadlineExceeded</code> 错误；</li>
+</ol>
+</li>
+<li>
+<p><code>Value</code>：从<a href="https://github.com/golang/go/blob/df2999ef43ea49ce1578137017949c0ee660608a/src/context/context.go#L62-L154"><code>context.Context</code></a>中获取键对应的值，该方法常常用于传递数据</p>
+</li>
+</ul>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Context</span> <span style="color:#66d9ef">interface</span> {
+	<span style="color:#a6e22e">Deadline</span>() (<span style="color:#a6e22e">deadline</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Time</span>, <span style="color:#a6e22e">ok</span> <span style="color:#66d9ef">bool</span>)
+	<span style="color:#a6e22e">Done</span>() <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">struct</span>{}
+	<span style="color:#a6e22e">Err</span>() <span style="color:#66d9ef">error</span>
+	<span style="color:#a6e22e">Value</span>(<span style="color:#a6e22e">key</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">interface</span>{}
+}
+</code></pre></div><p>Context的创建和调用关系是链式调用。有点类似于数据结构中的树。先有根节点，后再延伸出叶子节点。</p>
+<p>context包中存在6种方法，其中，<code>Background</code>和<code>TODO</code> 本质上都是<code>emptyCtx</code>结构体类型，是一个不可取消，没有设置截止时间，没有携带任何值的Context （常常被用于定义根节点）；其余方法均被用于生成子context对象。</p>
+<ul>
+<li>func Background() Context</li>
+<li>func TODO() Context</li>
+<li>func WithCancel(parent Context) (ctx Context, cancel CancelFunc)</li>
+<li>func WithDeadline(parent Context, deadline time.Time) (Context, CancelFunc)</li>
+<li>func WithTimeout(parent Context, timeout time.Duration) (Context, CancelFunc)</li>
+<li>func WithValue(parent Context, key, val interface{}) Context</li>
+</ul>
+<p>话不多说，直接看实现：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">favContextKey</span> <span style="color:#66d9ef">string</span>
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">reqURL</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>, <span style="color:#a6e22e">wg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>) {
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+	<span style="color:#a6e22e">url</span>, <span style="color:#a6e22e">_</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Value</span>(<span style="color:#a6e22e">favContextKey</span>(<span style="color:#e6db74">&#34;url&#34;</span>)).(<span style="color:#66d9ef">string</span>)
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#66d9ef">select</span> {
+		<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;stop getting url:%s\n&#34;</span>, <span style="color:#a6e22e">url</span>)
+			<span style="color:#66d9ef">return</span>
+		<span style="color:#66d9ef">default</span>:
+			<span style="color:#a6e22e">r</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Get</span>(<span style="color:#a6e22e">url</span>)
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">r</span>.<span style="color:#a6e22e">StatusCode</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">StatusOK</span> <span style="color:#f92672">&amp;&amp;</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">==</span> <span style="color:#66d9ef">nil</span> {
+				<span style="color:#a6e22e">body</span>, <span style="color:#a6e22e">_</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">ioutil</span>.<span style="color:#a6e22e">ReadAll</span>(<span style="color:#a6e22e">r</span>.<span style="color:#a6e22e">Body</span>)
+				<span style="color:#a6e22e">subCtx</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">WithValue</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">favContextKey</span>(<span style="color:#e6db74">&#34;resp&#34;</span>), <span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Sprintf</span>(<span style="color:#e6db74">&#34;%s,%s&#34;</span>, <span style="color:#a6e22e">url</span>, string(<span style="color:#a6e22e">body</span>)))
+				<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">1</span>)
+				<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">showResp</span>(<span style="color:#a6e22e">subCtx</span>, <span style="color:#a6e22e">wg</span>)
+			}
+			<span style="color:#a6e22e">r</span>.<span style="color:#a6e22e">Body</span>.<span style="color:#a6e22e">Close</span>()
+			<span style="color:#75715e">//启动子goroutine是为了不阻塞当前goroutine，这里在实际场景中可以去执行其他逻辑，这里为了方便直接sleep一秒
+</span><span style="color:#75715e"></span>			<span style="color:#75715e">// doSometing()
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span> <span style="color:#f92672">*</span> <span style="color:#ae81ff">1</span>)
+		}
+	}
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">showResp</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>, <span style="color:#a6e22e">wg</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>) {
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#66d9ef">select</span> {
+		<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;stop showing resp&#34;</span>)
+			<span style="color:#66d9ef">return</span>
+		<span style="color:#66d9ef">default</span>:
+			<span style="color:#75715e">//子goroutine里一般会处理一些IO任务，如读写数据库或者rpc调用，这里为了方便直接把数据打印
+</span><span style="color:#75715e"></span>			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;printing: &#34;</span>, <span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Value</span>(<span style="color:#a6e22e">favContextKey</span>(<span style="color:#e6db74">&#34;resp&#34;</span>)))
+			<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span> <span style="color:#f92672">*</span> <span style="color:#ae81ff">1</span>)
+		}
+	}
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#a6e22e">wg</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>{}
+	<span style="color:#a6e22e">values</span> <span style="color:#f92672">:=</span> []<span style="color:#66d9ef">string</span>{<span style="color:#e6db74">&#34;https://www.baidu.com/&#34;</span>, <span style="color:#e6db74">&#34;https://www.zhihu.com/&#34;</span>}
+	<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">cancel</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">WithCancel</span>(<span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Background</span>())
+
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">url</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">values</span> {
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">1</span>)
+		<span style="color:#a6e22e">subCtx</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">WithValue</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">favContextKey</span>(<span style="color:#e6db74">&#34;url&#34;</span>), <span style="color:#a6e22e">url</span>)
+		<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">reqURL</span>(<span style="color:#a6e22e">subCtx</span>, <span style="color:#a6e22e">wg</span>)
+	}
+
+	<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>() {
+		<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span> <span style="color:#f92672">*</span> <span style="color:#ae81ff">3</span>)
+		<span style="color:#a6e22e">cancel</span>()
+	}()
+
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;exit main goroutine&#34;</span>)
+}
+</code></pre></div><p>这个例子很好的演示了父goroutine和子goroutine之间利用context传递信息实现消息的共享。</p>
+<p>首先调用<code>context.Background()</code>生成根节点，然后调用<code>WithCancel</code>传入根节点，得到子节点，并生成<code>cancel</code>方法，后续通过执行<code>cancel</code>方法通知所有子节点结束运行。</p>
+<p>在<code>main</code>函数中，通过<code>context.WithValue</code>构造带<code>url</code>信息的context子节点，并传给子goroutine<code>reqURL</code>，该方法同样在<code>reqURL</code>中被掉用，用于将<code>responsBody</code>信息传给子goroutine<code>showResp</code>。</p>
+<h2 id="最后">最后</h2>
+<p>Context作为golang中并发控制和通信的大杀器，被广泛应用，在web框架、通信模块中非常常见。关于context的使用，也存在很多的&quot;坑&rdquo;。</p>
+<p>官方建议的Context使用原则：</p>
+<ul>
+<li>不要把Context放在结构体中，要以参数的方式传递</li>
+<li>以Context作为参数的函数方法，应该把Context作为第一个参数，放在第一位。</li>
+<li>给一个函数方法传递Context的时候，不要传递nil，如果不知道传递什么，就使用context.TODO</li>
+<li>Context的Value相关方法应该传递必须的数据，不要什么数据都使用这个传递</li>
+<li>Context是线程安全的，可以放心的在多个goroutine中传递</li>
+</ul>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>
