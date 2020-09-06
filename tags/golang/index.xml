@@ -5,10 +5,19 @@
     <link>https://yinson123.github.io/tags/golang/</link>
     <description>Recent content in golang on 静夜思</description>
     <generator>Hugo -- gohugo.io</generator>
-    <lastBuildDate>Sun, 16 Aug 2020 16:31:11 +0800</lastBuildDate>
+    <lastBuildDate>Tue, 25 Aug 2020 10:31:11 +0800</lastBuildDate>
     
 	<atom:link href="https://yinson123.github.io/tags/golang/index.xml" rel="self" type="application/rss+xml" />
     
+    
+    <item>
+      <title>goroutine调度模型</title>
+      <link>https://yinson123.github.io/post/go-runtime/</link>
+      <pubDate>Tue, 25 Aug 2020 10:31:11 +0800</pubDate>
+      
+      <guid>https://yinson123.github.io/post/go-runtime/</guid>
+      <description>golang GMP模型与goroutine调度</description>
+    </item>
     
     <item>
       <title>kubernetes源码分析之informer(下篇)</title>
