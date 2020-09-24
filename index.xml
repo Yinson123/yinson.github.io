@@ -5,10 +5,19 @@
     <link>https://yinson123.github.io/</link>
     <description>Recent content on 静夜思</description>
     <generator>Hugo -- gohugo.io</generator>
-    <lastBuildDate>Tue, 25 Aug 2020 10:31:11 +0800</lastBuildDate>
+    <lastBuildDate>Thu, 10 Sep 2020 20:30:03 +0800</lastBuildDate>
     
 	<atom:link href="https://yinson123.github.io/index.xml" rel="self" type="application/rss+xml" />
     
+    
+    <item>
+      <title>golang实现简单消息队列</title>
+      <link>https://yinson123.github.io/post/mq/</link>
+      <pubDate>Thu, 10 Sep 2020 20:30:03 +0800</pubDate>
+      
+      <guid>https://yinson123.github.io/post/mq/</guid>
+      <description>golang手撸一个消息队列</description>
+    </item>
     
     <item>
       <title>goroutine调度模型</title>

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>golang实现简单消息队列 &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>golang实现简单消息队列</h1>
+  <time datetime=2020-09-10T20:30:03&#43;0800 class="post-date">Thu, Sep 10, 2020</time>
+  <h2 id="开始">开始</h2>
+<blockquote>
+<ol>
+<li>消息队列（Message Queue），是分布式系统中重要的组件，其通用的使用场景可以简单地描述为：当不需要立即获得结果，但是并发量又需要进行控制的时候，差不多就是需要使用消息队列的时候</li>
+<li>消息队列主要解决了 应用耦合、异步消息、流量削锋等问题。实现高性能、高可用、可伸缩和最终一致性架构</li>
+<li>当前使用较多的消息队列有RabbitMQ、RocketMQ、ActiveMQ、Kafka、ZeroMQ、MetaMq等，而部分数据库如Redis、Mysql以及phxsql也可实现消息队列的功能</li>
+</ol>
+</blockquote>
+<p>今天就来尝试通过golang手撸一个简单的消息队列。</p>
+<p>消息队列，顾名思义就是用来存放消息的队列。生产者将消息存放在消息队列中，消费者通过消息队列读取生产者推送的消息。</p>
+<h2 id="简易版">简易版</h2>
+<p>利用golang中channel的特点，通过一个goroutine往channel中“塞”数据，另一个goroutine读取channel中的数据，很容易实现极简版的消息队列。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#a6e22e">c</span> <span style="color:#f92672">:=</span> make(<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{})
+<span style="color:#a6e22e">wg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>{}
+<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">2</span>)
+<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">cancel</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">WithCancel</span>(<span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Background</span>())
+
+<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>){
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#66d9ef">select</span> {
+		<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;stop getting message&#34;</span>)
+			<span style="color:#66d9ef">return</span>
+		<span style="color:#66d9ef">case</span> <span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">c</span>:
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;get message&#34;</span>, <span style="color:#a6e22e">msg</span>.(<span style="color:#66d9ef">string</span>))
+		<span style="color:#66d9ef">default</span>:
+		}
+	}
+}(<span style="color:#a6e22e">ctx</span>)
+
+<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>) {
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+	<span style="color:#66d9ef">for</span> {
+		<span style="color:#66d9ef">select</span> {
+		<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;stop sending message&#34;</span>)
+			<span style="color:#66d9ef">return</span>
+		<span style="color:#66d9ef">default</span>:
+			<span style="color:#a6e22e">c</span> <span style="color:#f92672">&lt;-</span> <span style="color:#e6db74">&#34;one message&#34;</span>
+			<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+		}
+	}
+}(<span style="color:#a6e22e">ctx</span>)
+
+<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#ae81ff">10</span><span style="color:#f92672">*</span><span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+<span style="color:#a6e22e">cancel</span>()
+<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;exit main goroutine&#34;</span>)
+</code></pre></div><p>通过<code>c</code>实现消息传递，通过<code>ctx</code>控制goroutine是否结束。但是无缓存通道会因为消费者处理不及时，而导致生产者写入被阻塞；同时，现实中也常常不止一个消费者，很多消费者可能会同时订阅同一个主题。此时，简陋版就显得捉襟见肘。</p>
+<h2 id="中级版">中级版</h2>
+<p>为了因对无缓存通道导致消息写入阻塞的问题，就需要采用缓存通道。同时，也不能再采用简单的一个通道传递一种消息的方式来解决多个消费者订阅同一个主题的问题。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">MQ</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">capacity</span> <span style="color:#66d9ef">int</span>
+	<span style="color:#a6e22e">subscribers</span> []<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#a6e22e">mq</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">MQ</span>{<span style="color:#ae81ff">3</span>, make([]<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#ae81ff">0</span>)}
+	<span style="color:#a6e22e">wg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>{}
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">3</span>)
+	<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">cancel</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">WithCancel</span>(<span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Background</span>())
+
+	<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>){
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+		<span style="color:#a6e22e">ch</span> <span style="color:#f92672">:=</span> make(<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">capacity</span>)
+		<span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">subscribers</span> = append(<span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">subscribers</span>, <span style="color:#a6e22e">ch</span>)
+		<span style="color:#66d9ef">for</span> {
+			<span style="color:#66d9ef">select</span> {
+			<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;consumer1 stop getting message&#34;</span>)
+				<span style="color:#66d9ef">return</span>
+			<span style="color:#66d9ef">case</span> <span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ch</span>:
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;consumer1 get message&#34;</span>, <span style="color:#a6e22e">msg</span>.(<span style="color:#66d9ef">string</span>))
+			<span style="color:#66d9ef">default</span>:
+			}
+		}
+	}(<span style="color:#a6e22e">ctx</span>)
+
+
+	<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>){
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+		<span style="color:#a6e22e">ch</span> <span style="color:#f92672">:=</span> make(<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">capacity</span>)
+		<span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">subscribers</span> = append(<span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">subscribers</span>, <span style="color:#a6e22e">ch</span>)
+		<span style="color:#66d9ef">for</span> {
+			<span style="color:#66d9ef">select</span> {
+			<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;consumer2 stop getting message&#34;</span>)
+				<span style="color:#66d9ef">return</span>
+			<span style="color:#66d9ef">case</span> <span style="color:#a6e22e">msg</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ch</span>:
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;consumer2 get message&#34;</span>, <span style="color:#a6e22e">msg</span>.(<span style="color:#66d9ef">string</span>))
+			<span style="color:#66d9ef">default</span>:
+			}
+		}
+	}(<span style="color:#a6e22e">ctx</span>)
+
+
+	<span style="color:#66d9ef">go</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>) {
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+		<span style="color:#66d9ef">for</span> {
+			<span style="color:#66d9ef">select</span> {
+			<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;producer stop sending message&#34;</span>)
+				<span style="color:#66d9ef">return</span>
+			<span style="color:#66d9ef">default</span>:
+				<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">_</span>, <span style="color:#a6e22e">ch</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">mq</span>.<span style="color:#a6e22e">subscribers</span> {
+					<span style="color:#a6e22e">ch</span> <span style="color:#f92672">&lt;-</span> <span style="color:#e6db74">&#34;one message&#34;</span>
+				}
+
+				<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+			}
+		}
+	}(<span style="color:#a6e22e">ctx</span>)
+
+	<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#ae81ff">10</span><span style="color:#f92672">*</span><span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+	<span style="color:#a6e22e">cancel</span>()
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;exit main goroutine&#34;</span>)
+}
+</code></pre></div><p>噔噔噔噔&hellip;中级版本的消息队列有2个消费者，1个生产者。通过<code>MQ</code>中的<code>subscribers</code>保存订阅主题的消费者。每次生产消息时，都需要同时往所有订阅主题的消费者推送消息。同时，<code>MQ</code>中设置了每个通道的缓存大小，每次生成新的消费者时，动态创建一个缓存大小为<code>MQ.capacity</code>大小的通道，用于接收消息，同时将该channel保存到<code>MQ</code>的<code>subscribers</code>数组中，以便生产者推送消息。</p>
+<p>但是中级版消息生产者在推送消息时，每次都遍历所有订阅者，影响效率。虽然每个消费者的通道都采用了缓存的设计，但是假如其中一个消费者的通道被&quot;塞满&quot;时，所有消息推送都将被阻塞。同时，作为一个成熟的消息队列中间件，必须要有消息订阅、取消订阅这些功能，消息主题也需要有多个。</p>
+<h2 id="顶配版">顶配版</h2>
+<p>顶配版消息队列破茧而出。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">MQI</span> <span style="color:#66d9ef">interface</span> {
+	<span style="color:#a6e22e">Publish</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">msg</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">error</span>
+	<span style="color:#a6e22e">Subscribe</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>) (<span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#66d9ef">error</span>)
+	<span style="color:#a6e22e">UnSubscribe</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">ch</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">error</span>
+	<span style="color:#a6e22e">GetPayLoad</span>(<span style="color:#a6e22e">ch</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}) (<span style="color:#66d9ef">interface</span>{}, <span style="color:#66d9ef">error</span>)
+	<span style="color:#a6e22e">Close</span>()
+}
+</code></pre></div><p>首先，作为MQ，就必须要有<code>Publish</code>, <code>Subsribe</code>, <code>UnSubscribe</code>,<code>GetPayload</code>和<code>Close</code>方法。</p>
+<ul>
+<li><code>Publish</code>：用于生产者发布消息</li>
+<li><code>Subsribe</code>:  用于消费者进行消息订阅</li>
+<li><code>UnSubscribe</code>: 用于消费者取消消息订阅</li>
+<li><code>GetPayload</code>: 用于消费者获取消息</li>
+<li><code>Close</code>:  用于关闭MQ</li>
+</ul>
+<p>接下来是<code>MQ</code>的实现对象<code>MessageQueue</code></p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">MessageQueue</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">capacity</span>    <span style="color:#66d9ef">int</span>
+	<span style="color:#a6e22e">subscribers</span> <span style="color:#66d9ef">map</span>[<span style="color:#66d9ef">string</span>][]<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}
+	<span style="color:#a6e22e">ctx</span>         <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>
+	<span style="color:#a6e22e">cancel</span>      <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">CancelFunc</span>
+	<span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">RWMutex</span>
+}
+</code></pre></div><ul>
+<li><code>capacity</code>：用于定义消息收发的缓冲通道大小</li>
+<li><code>subscribers</code>： 用于保存订阅不同<code>topic</code>的通道</li>
+<li><code>ctx</code>，<code>cancel</code>：看名字就知道，协程通知上下文，用于通知<code>MQ</code>关闭</li>
+<li><code>RWMutex</code>：用于处理消息订阅和取消订阅时对<code>subscribes</code>对象的并发读写</li>
+</ul>
+<p>来看看具体实现：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">mQ</span> <span style="color:#a6e22e">MessageQueue</span>) <span style="color:#a6e22e">Publish</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">msg</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">error</span> {
+	<span style="color:#66d9ef">select</span> {
+	<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+		<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;&#34;</span>)
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;the channel already closed&#34;</span>)
+	<span style="color:#66d9ef">default</span>:
+		<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">RLock</span>()
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">RUnlock</span>()
+		<span style="color:#a6e22e">chans</span>, <span style="color:#a6e22e">ok</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">subscribers</span>[<span style="color:#a6e22e">topic</span>]
+		<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">ok</span> {
+			<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Errorf</span>(<span style="color:#e6db74">&#34;no channels with topic %s found&#34;</span>, <span style="color:#a6e22e">topic</span>)
+		}
+
+		<span style="color:#a6e22e">pub</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">cap</span> <span style="color:#66d9ef">int</span>) {
+			<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">j</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">j</span> &lt; <span style="color:#a6e22e">cap</span>; <span style="color:#a6e22e">j</span> <span style="color:#f92672">+=</span> <span style="color:#ae81ff">1</span> {
+				<span style="color:#66d9ef">select</span> {
+				<span style="color:#66d9ef">case</span> <span style="color:#a6e22e">chans</span>[<span style="color:#a6e22e">j</span>] <span style="color:#f92672">&lt;-</span> <span style="color:#a6e22e">msg</span>:
+				<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">After</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Millisecond</span> <span style="color:#f92672">*</span> <span style="color:#ae81ff">5</span>):
+				<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+					<span style="color:#66d9ef">return</span>
+				}
+			}
+		}
+		<span style="color:#a6e22e">pub</span>(len(<span style="color:#a6e22e">chans</span>))
+	}
+	<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">mQ</span> <span style="color:#a6e22e">MessageQueue</span>) <span style="color:#a6e22e">Subscribe</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>) (<span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#66d9ef">error</span>) {
+	<span style="color:#a6e22e">ch</span> <span style="color:#f92672">:=</span> make(<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">capacity</span>)
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">subscribers</span>[<span style="color:#a6e22e">topic</span>] = append(<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">subscribers</span>[<span style="color:#a6e22e">topic</span>], <span style="color:#a6e22e">ch</span>)
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">Unlock</span>()
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">ch</span>, <span style="color:#66d9ef">nil</span>
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">mQ</span> <span style="color:#a6e22e">MessageQueue</span>) <span style="color:#a6e22e">UnSubscribe</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">ch</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}) <span style="color:#66d9ef">error</span> {
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">Unlock</span>()
+	<span style="color:#a6e22e">chs</span>, <span style="color:#a6e22e">ok</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">subscribers</span>[<span style="color:#a6e22e">topic</span>]
+	<span style="color:#66d9ef">if</span> !<span style="color:#a6e22e">ok</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Errorf</span>(<span style="color:#e6db74">&#34;no channel found with topic %s&#34;</span>, <span style="color:#a6e22e">topic</span>)
+	}
+
+	<span style="color:#66d9ef">func</span>() {
+		<span style="color:#a6e22e">newChs</span> <span style="color:#f92672">:=</span> make([]<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}, <span style="color:#ae81ff">0</span>)
+		<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span>, <span style="color:#a6e22e">c</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">range</span> <span style="color:#a6e22e">chs</span> {
+			<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">c</span> <span style="color:#f92672">==</span> <span style="color:#a6e22e">ch</span> {
+				<span style="color:#a6e22e">newChs</span> = append(<span style="color:#a6e22e">newChs</span>, <span style="color:#a6e22e">chs</span>[<span style="color:#a6e22e">i</span>:]<span style="color:#f92672">...</span>)
+				<span style="color:#66d9ef">break</span>
+			}
+			<span style="color:#a6e22e">newChs</span> = append(<span style="color:#a6e22e">newChs</span>, <span style="color:#a6e22e">c</span>)
+		}
+		<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">subscribers</span>[<span style="color:#a6e22e">topic</span>] = <span style="color:#a6e22e">newChs</span>
+	}()
+
+	<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">mQ</span> <span style="color:#a6e22e">MessageQueue</span>) <span style="color:#a6e22e">GetPayLoad</span>(<span style="color:#a6e22e">ch</span> <span style="color:#f92672">&lt;-</span><span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}) (<span style="color:#66d9ef">interface</span>{}, <span style="color:#66d9ef">error</span>) {
+	<span style="color:#a6e22e">val</span>, <span style="color:#a6e22e">ok</span> <span style="color:#f92672">:=</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">ch</span>
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">ok</span> {
+		<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">val</span>, <span style="color:#66d9ef">nil</span>
+	}
+	<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>, <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;channel already close&#34;</span>)
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">mQ</span> <span style="color:#a6e22e">MessageQueue</span>) <span style="color:#a6e22e">Close</span>() {
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">subscribers</span> = make(<span style="color:#66d9ef">map</span>[<span style="color:#66d9ef">string</span>][]<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{})
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">Unlock</span>()
+	<span style="color:#a6e22e">mQ</span>.<span style="color:#a6e22e">cancel</span>()
+}
+</code></pre></div><p>整体思路比较简单，就是在新增<code>topic</code>订阅时，往<code>map</code>中的<code>chan</code>队列中增加新的<code>chan</code>；取消订阅时，删除原先的<code>chan</code>；获取订阅信息时，从<code>chan</code>读取数据；推送消息时，又往对应的<code>chan</code>送入数据。当<code>MQ</code>执行<code>Close</code>时，通过原先的消息上下文通知各个生产者和消费者退出。有个细节值得一提：在生产者推送消息时，会往对应的订阅者通道发送数据，但是假如此时消费者通道缓存已经被塞满的话，会被阻塞，所以最多会等待<code>5ms</code>，超时之后，自动丢弃该数据。</p>
+<p>最后来看看初始化和主程序：</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">initMQ</span>(<span style="color:#a6e22e">cap</span> <span style="color:#66d9ef">int</span>) <span style="color:#a6e22e">MessageQueue</span> {
+	<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">cancel</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">WithCancel</span>(<span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Background</span>())
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">MessageQueue</span>{
+		<span style="color:#a6e22e">capacity</span>:    <span style="color:#a6e22e">cap</span>,
+		<span style="color:#a6e22e">subscribers</span>: make(<span style="color:#66d9ef">map</span>[<span style="color:#66d9ef">string</span>][]<span style="color:#66d9ef">chan</span> <span style="color:#66d9ef">interface</span>{}),
+		<span style="color:#a6e22e">ctx</span>:         <span style="color:#a6e22e">ctx</span>,
+		<span style="color:#a6e22e">cancel</span>:      <span style="color:#a6e22e">cancel</span>,
+	}
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#a6e22e">cap</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">100</span>
+	<span style="color:#a6e22e">wg</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">WaitGroup</span>{}
+	<span style="color:#a6e22e">myMQ</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">initMQ</span>(<span style="color:#a6e22e">cap</span>)
+
+	<span style="color:#a6e22e">sub</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">idx</span> <span style="color:#66d9ef">int</span>, <span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>) {
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+		<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">ch</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">Subscribe</span>(<span style="color:#a6e22e">topic</span>); <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+			<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#a6e22e">err</span>)
+			<span style="color:#a6e22e">os</span>.<span style="color:#a6e22e">Exit</span>(<span style="color:#ae81ff">1</span>)
+		} <span style="color:#66d9ef">else</span> {
+		<span style="color:#a6e22e">loop</span>:
+			<span style="color:#66d9ef">for</span> {
+				<span style="color:#66d9ef">select</span> {
+				<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+					<span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">UnSubscribe</span>(<span style="color:#a6e22e">topic</span>, <span style="color:#a6e22e">ch</span>)
+					<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;comsumer %d exit\n&#34;</span>, <span style="color:#a6e22e">idx</span>)
+					<span style="color:#66d9ef">return</span>
+				<span style="color:#66d9ef">default</span>:
+					<span style="color:#a6e22e">msg</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">GetPayLoad</span>(<span style="color:#a6e22e">ch</span>)
+					<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+						<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;consumer %d get message error %s\n&#34;</span>, <span style="color:#a6e22e">idx</span>, <span style="color:#a6e22e">err</span>.<span style="color:#a6e22e">Error</span>())
+						<span style="color:#66d9ef">break</span> <span style="color:#a6e22e">loop</span>
+					}
+					<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Printf</span>(<span style="color:#e6db74">&#34;consumer %d get message %s\n&#34;</span>, <span style="color:#a6e22e">idx</span>, <span style="color:#a6e22e">msg</span>.(<span style="color:#66d9ef">string</span>))
+					<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+				}
+			}
+		}
+	}
+
+	<span style="color:#66d9ef">for</span> <span style="color:#a6e22e">i</span> <span style="color:#f92672">:=</span> <span style="color:#ae81ff">0</span>; <span style="color:#a6e22e">i</span> &lt; <span style="color:#ae81ff">10</span>; <span style="color:#a6e22e">i</span><span style="color:#f92672">++</span> {
+		<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">2</span>)
+		<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">sub</span>(<span style="color:#a6e22e">i</span>, <span style="color:#e6db74">&#34;myTopic&#34;</span>)
+		<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">sub</span>(<span style="color:#a6e22e">i</span>, <span style="color:#e6db74">&#34;newTopic&#34;</span>)
+	}
+
+	<span style="color:#a6e22e">pub</span> <span style="color:#f92672">:=</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">topic</span> <span style="color:#66d9ef">string</span>) {
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Done</span>()
+		<span style="color:#66d9ef">for</span> {
+			<span style="color:#66d9ef">select</span> {
+			<span style="color:#66d9ef">case</span> <span style="color:#f92672">&lt;-</span><span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">ctx</span>.<span style="color:#a6e22e">Done</span>():
+				<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;stop publishing&#34;</span>)
+				<span style="color:#66d9ef">return</span>
+			<span style="color:#66d9ef">default</span>:
+				<span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">Publish</span>(<span style="color:#a6e22e">topic</span>, <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Now</span>().<span style="color:#a6e22e">Format</span>(<span style="color:#e6db74">&#34;Mon Jan 2 15:04:05 -0700 MST 2006&#34;</span>))
+				<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+			}
+		}
+
+	}
+
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Add</span>(<span style="color:#ae81ff">2</span>)
+	<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">pub</span>(<span style="color:#e6db74">&#34;myTopic&#34;</span>)
+	<span style="color:#66d9ef">go</span> <span style="color:#a6e22e">pub</span>(<span style="color:#e6db74">&#34;newTopic&#34;</span>)
+
+	<span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Sleep</span>(<span style="color:#ae81ff">10</span> <span style="color:#f92672">*</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Second</span>)
+	<span style="color:#a6e22e">myMQ</span>.<span style="color:#a6e22e">Close</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;stopping&#34;</span>)
+	<span style="color:#a6e22e">wg</span>.<span style="color:#a6e22e">Wait</span>()
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#e6db74">&#34;exit&#34;</span>)
+}
+</code></pre></div><p>在这个样例里，一共有2个生产者，20个消息者。</p>
+<h2 id="最后">最后</h2>
+<p>本文中所谓的“顶配版”不过玩笑之词。如果要投入生产使用，有很多功能还需完善。例如：在消息的广播中，采用遍历，依次往各个通道放入消息；订阅者列表采用切片的方式导致取消订阅时又需重新遍历切片等等操作时间复杂度都比较高。同样的，在复杂的生产环境中，肯定也存在各种问题和漏洞。笔者此处仅为抛砖引玉~</p>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>
