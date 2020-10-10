@@ -5,7 +5,7 @@
     <link>https://yinson123.github.io/tags/</link>
     <description>Recent content in Tags on 静夜思</description>
     <generator>Hugo -- gohugo.io</generator>
-    <lastBuildDate>Thu, 10 Sep 2020 20:30:03 +0800</lastBuildDate>
+    <lastBuildDate>Sat, 10 Oct 2020 20:26:03 +0800</lastBuildDate>
     
 	<atom:link href="https://yinson123.github.io/tags/index.xml" rel="self" type="application/rss+xml" />
     
@@ -13,9 +13,18 @@
     <item>
       <title>golang</title>
       <link>https://yinson123.github.io/tags/golang/</link>
-      <pubDate>Thu, 10 Sep 2020 20:30:03 +0800</pubDate>
+      <pubDate>Sat, 10 Oct 2020 20:26:03 +0800</pubDate>
       
       <guid>https://yinson123.github.io/tags/golang/</guid>
+      <description></description>
+    </item>
+    
+    <item>
+      <title>随笔</title>
+      <link>https://yinson123.github.io/tags/%E9%9A%8F%E7%AC%94/</link>
+      <pubDate>Sat, 10 Oct 2020 20:26:03 +0800</pubDate>
+      
+      <guid>https://yinson123.github.io/tags/%E9%9A%8F%E7%AC%94/</guid>
       <description></description>
     </item>
     

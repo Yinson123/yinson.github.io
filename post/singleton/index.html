@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <link href="https://gmpg.org/xfn/11" rel="profile">
+  <meta http-equiv="content-type" content="text/html; charset=utf-8">
+  <meta name="generator" content="Hugo 0.73.0" />
+
+  
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>golang单例模式之sync.Once &middot; 静夜思</title>
+  <meta name="description" content="" />
+
+  
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/print.css" media="print">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/poole.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/syntax.css">
+  <link type="text/css" rel="stylesheet" href="https://yinson123.github.io/css/hyde.css">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Abril+Fatface|PT+Sans:400,400i,700">
+
+
+  
+  <link rel="apple-touch-icon-precomposed" sizes="144x144" href="/apple-touch-icon-144-precomposed.png">
+  <link rel="shortcut icon" href="/favicon.png">
+
+  
+  
+</head>
+
+  <body class=" ">
+  <aside class="sidebar">
+  <div class="container sidebar-sticky">
+    <div class="sidebar-about">
+      <a href="https://yinson123.github.io/"><h1>静夜思</h1></a>
+      <p class="lead">
+       且视他人之疑目如盏盏鬼火，大胆地去走你的夜路。 
+      </p>
+    </div>
+
+    <nav>
+      <ul class="sidebar-nav">
+        <li><a href="https://yinson123.github.io/">首页</a> </li>
+
+      </ul>
+    </nav>
+	
+	<div id="social" class="col span_6">
+       <ul>
+          <li><a href="https://github.com/Yinson123" target="_blank">GitHub</a></li>
+          <li><a href="mailto: 908131753@qq.com" target="_blank">Mail Me</a></li>
+        </ul>
+     </div>
+
+    <p>Copyright (c) 2020, Yinson</p>
+	<p>Powered by Hugo 0.73.0</p>
+	
+  </div>
+</aside>
+
+    <main class="content container">
+    <div class="post">
+  <h1>golang单例模式之sync.Once</h1>
+  <time datetime=2020-10-10T20:26:03&#43;0800 class="post-date">Sat, Oct 10, 2020</time>
+  <h2 id="由来">由来</h2>
+<p>最近笔者参加了一场面试，其中聊到常用的设计模式，要求使用golang实现单例模式。本来因为golang本身推崇的原子操作，单例模式实现不算复杂，但无奈笔者突然忘记了<code>sync.Once</code>的用法，还是太菜。特此记录，加深印象。</p>
+<h2 id="关于单例模式singleton">关于单例模式(Singleton)</h2>
+<p>单例模式是日常接触到最简单也是最常见的设计模式之一。表示一个类只有唯一的一个对象，并且该类对整个系统可见。常常具有以下特点：</p>
+<blockquote>
+<ul>
+<li>这些类只能有一个实例；</li>
+<li>这些能够自动实例化；</li>
+<li>这个类对整个系统可见，即必须向整个系统提供这个实例。</li>
+</ul>
+</blockquote>
+<p>正是因为单例模式的这些特点，常常被用在资源单一，严格控制的场景下，例如：数据库的连接类，协程池的控制类。</p>
+<h2 id="单例模式的实现">单例模式的实现</h2>
+<p>单例模式又分为饿汉模式和懒汉模式。</p>
+<h3 id="饿汉模式">饿汉模式</h3>
+<p>在程序启动时就已经完成实例化。往往利用golang <code>init</code>方法，在初始化时就实例化对象。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Instance</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">s</span> <span style="color:#66d9ef">string</span>
+}
+
+<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">myInstance</span> <span style="color:#a6e22e">Instance</span>
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">init</span>() {
+	<span style="color:#a6e22e">myInstance</span> = <span style="color:#a6e22e">Instance</span>{<span style="color:#a6e22e">s</span>:<span style="color:#e6db74">&#34;haha&#34;</span>}
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">GetInstance</span>() <span style="color:#a6e22e">Instance</span> {
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">myInstance</span>
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#a6e22e">GetInstance</span>().<span style="color:#a6e22e">s</span>)
+}
+</code></pre></div><h2 id="懒汉模式">懒汉模式</h2>
+<p>往往在使用的过程中才完成实例化，为了解决线程安全的问题，常常使用<code>sync.Once</code>方法。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Instance</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">s</span> <span style="color:#66d9ef">string</span>
+}
+
+<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">once</span> <span style="color:#a6e22e">sync</span>.<span style="color:#a6e22e">Once</span>
+<span style="color:#66d9ef">var</span> <span style="color:#a6e22e">myInstance</span> <span style="color:#a6e22e">Instance</span>
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">GetInstance</span>() <span style="color:#a6e22e">Instance</span> {
+	<span style="color:#a6e22e">once</span>.<span style="color:#a6e22e">Do</span>(<span style="color:#66d9ef">func</span>(){
+		<span style="color:#a6e22e">myInstance</span> = <span style="color:#a6e22e">Instance</span>{<span style="color:#a6e22e">s</span>: <span style="color:#e6db74">&#34;haha&#34;</span>}
+	})
+	<span style="color:#66d9ef">return</span> <span style="color:#a6e22e">myInstance</span>
+}
+
+<span style="color:#66d9ef">func</span> <span style="color:#a6e22e">main</span>() {
+	<span style="color:#a6e22e">fmt</span>.<span style="color:#a6e22e">Println</span>(<span style="color:#a6e22e">GetInstance</span>().<span style="color:#a6e22e">s</span>)
+}
+</code></pre></div><h2 id="synconce">sync.Once</h2>
+<p>从上面的懒汉模式可以看出，<code>sync.Once</code>可以保证并发安全。来看看<code>Once</code>的实现吧</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Once</span> <span style="color:#66d9ef">struct</span> {
+	<span style="color:#a6e22e">done</span> <span style="color:#66d9ef">uint32</span>
+	<span style="color:#a6e22e">m</span>    <span style="color:#a6e22e">Mutex</span>
+}
+</code></pre></div><p>可以看到，<code>Once</code>结构很简单，<code>done</code>作为是否实例完成的标记，<code>m</code>则是为了保证实例化时的并发安全。</p>
+<div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">o</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Once</span>) <span style="color:#a6e22e">Do</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>()) {
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">LoadUint32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">o</span>.<span style="color:#a6e22e">done</span>) <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#a6e22e">o</span>.<span style="color:#a6e22e">doSlow</span>(<span style="color:#a6e22e">f</span>)
+	}
+}
+
+<span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">o</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Once</span>) <span style="color:#a6e22e">doSlow</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>()) {
+	<span style="color:#a6e22e">o</span>.<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Lock</span>()
+	<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">o</span>.<span style="color:#a6e22e">m</span>.<span style="color:#a6e22e">Unlock</span>()
+	<span style="color:#66d9ef">if</span> <span style="color:#a6e22e">o</span>.<span style="color:#a6e22e">done</span> <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span> {
+		<span style="color:#66d9ef">defer</span> <span style="color:#a6e22e">atomic</span>.<span style="color:#a6e22e">StoreUint32</span>(<span style="color:#f92672">&amp;</span><span style="color:#a6e22e">o</span>.<span style="color:#a6e22e">done</span>, <span style="color:#ae81ff">1</span>)
+		<span style="color:#a6e22e">f</span>()
+	}
+}
+</code></pre></div><p><code>Do</code>方法就是通过<code>done</code>方法判断是否执行实例化函数<code>f</code>，执行完<code>f</code>后，将<code>done</code>置为1。</p>
+<p>值得一提的是，<code>doSlow</code>方法里的细节：在执行完<code>f</code>后再通过<code>defer</code>将<code>done</code>置1，而不是先将<code>done</code>置1，再执行<code>f</code>。区别就是在两个协程同时调用<code>Do</code>的时候，在后者的实现中：其中一个协程将<code>done</code>置1，同时执行<code>f</code>；另一个协程则因<code>done</code>已置1，直接返回，而此时<code>f</code>还未被实例化。而前者的实现能保证<code>f</code>执行完后，再将<code>done</code>置1。同时因<code>mutex</code>的存在，第二个协程被阻塞。真正保证了并发安全和一次实例化。</p>
+<h2 id="最后">最后</h2>
+<p>每一处实现都需要经受推敲，每一行代码都值得被推崇。自己还需多多努力！</p>
+
+</div>
+
+
+    </main>
+
+    
+      
+    
+  </body>
+</html>

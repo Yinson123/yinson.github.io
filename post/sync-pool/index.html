@@ -394,7 +394,7 @@
 	<span style="color:#66d9ef">return</span> <span style="color:#66d9ef">nil</span>
 }
 </code></pre></div><p><code>getSlow</code>方法实现了从其他<strong>P</strong>的<code>shared</code>中“偷取”对象的逻辑。</p>
-<p>在整个<code>pool</code>包的<code>init</code>函数中， 向 <strong>GC</strong> 注册 <code>poolCleanup</code> 函数，在每次<strong>TWS</strong>之前都会运行该函数。</p>
+<p>在整个<code>pool</code>包的<code>init</code>函数中， 向 <strong>GC</strong> 注册 <code>poolCleanup</code> 函数，在每次<strong>STW</strong>之前都会运行该函数。</p>
 <div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">poolCleanup</span>() {
 	<span style="color:#75715e">// This function is called with the world stopped, at the beginning of a garbage collection.
 </span><span style="color:#75715e"></span>	<span style="color:#75715e">// It must not allocate and probably should not call any runtime functions.

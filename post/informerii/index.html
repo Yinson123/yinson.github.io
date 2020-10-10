@@ -66,7 +66,7 @@
 <p>在<a href="https://yinson123.github.io/post/informer/">kubernetes源码分析之informer(上篇)</a>中我们提到，informer是通过<code>reflector</code>对<code>apiserver</code>进行<strong>List&amp;Watch</strong>，并将待观察的对象保存到<code>DeltaFIFO</code>队列中，交给<code>informer</code>进行处理。<code>informer</code>再将<code>DelataFIFO</code>队列中的事件交给<code>indexer</code>持久化保存到本地的缓存中。</p>
 <h2 id="controller">controller</h2>
 <p><img src="../../img/informer-controller.jpeg" alt=""></p>
-<p>细心的读者或许发现，其实<a href="https://yinson123.github.io/post/informer/">kubernetes源码分析之informer(上篇)</a>中出现的图恰好是本图的上半部分。上篇中也仅仅是分析了上半部分的informer结构。本篇将从controller实现上分析informer结构的优势。</p>
+<p>细心的读者或许发现，其实<a href="https://yinson123.github.io/post/informer/">kubernetes源码分析之informer(上篇)</a>中出现的图也是本图。上篇中也仅仅是分析了上半部分的informer结构。本篇将从controller实现上分析informer结构的优势。</p>
 <p>首先还是一样从主函数开始：</p>
 <div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang">	<span style="color:#a6e22e">klog</span>.<span style="color:#a6e22e">InitFlags</span>(<span style="color:#66d9ef">nil</span>)
 	<span style="color:#a6e22e">flag</span>.<span style="color:#a6e22e">Parse</span>()
@@ -303,7 +303,7 @@
 <li><code>controller.Run</code>启动<code>controller</code>对<code>deployment</code>资源和<code>foo(自定义的CRD)</code>资源进行处理。这里主要是对<code>EventHandler</code>中处理完后放入<code>workqueque</code>中的object做处理。</li>
 </ul>
 <h2 id="最后">最后</h2>
-<p>可以看到，基于<code>informer</code>定义<code>sample-controller</code>实现对特点资源的读写操作非常方便。用户甚至无需对底层过于关系，只需要实现<code>informerFactory</code>，注册对应的<code>EventHandler</code>方法，启动<code>informer</code>和<code>controller</code>即可。当我们对<code>controller</code>中执行对应<code>Lister</code>对象的<code>Get</code>和<code>List</code>方法，其实都是对于<code>informer</code>结构中的<code>localStorage</code>对象执行查询，并不会对<code>apiserver</code>执行查询操作；而执行<code>create</code>方法时，往往是直接通过<code>clientSet</code>调用<code>apiserver</code>接口创建对象。</p>
+<p>可以看到，基于<code>informer</code>定义<code>sample-controller</code>实现对特点资源的读写操作非常方便。用户甚至无需对底层过于关心，只需要实现<code>informerFactory</code>，注册对应的<code>EventHandler</code>方法，启动<code>informer</code>和<code>controller</code>即可。当我们对<code>controller</code>中执行对应<code>Lister</code>对象的<code>Get</code>和<code>List</code>方法，其实都是对于<code>informer</code>结构中的<code>localStorage</code>对象执行查询，并不会对<code>apiserver</code>执行查询操作；而执行<code>create</code>方法时，往往是直接通过<code>clientSet</code>调用<code>apiserver</code>接口创建对象。</p>
 <p>由于篇幅的限制，对<code>informer</code>中很多的实现细节，没有过多的深入。有时间的话，后续文章会做分析。<code>client-go</code>中的代码实现特别优雅，甚至有炫技的嫌疑。不得不说，<code>informer</code>的实现非常的巧妙，架构设计非常优秀。</p>
 
 </div>

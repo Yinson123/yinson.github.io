@@ -235,7 +235,7 @@
 
 	<span style="color:#a6e22e">options</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Options</span>
 }
-</code></pre></div><p>其中结构体变量<code>woker</code>是一个自定义的interface，并且定义了六个“抽象”函数<code>len</code>,<code>isEmpty</code>,<code>insert</code>,<code>detach</code>,<code>retrieveExpiry</code>和<code>reset</code>，从函数名就可以看出每个函数的作用。当前有两个结构体“实现了”这个interface，分别是<code>loopQueue</code>和<code>workerStack</code>。这两个结构体的区别就是<code>loopQueue</code>可以在初始化<code>pool</code>实例的时候<strong>预分配内存</strong>。所以如果通过<code>NewPool</code>初始化<code>pool</code>实例并且在<code>option</code>中定义了<code>PreAlloc</code>值的话，就会使用<code>loopQueue</code>来实现<code>wokrer</code>队列。</p>
+</code></pre></div><p>其中结构体变量<code>woker</code>是一个自定义的interface，并且定义了六个“抽象”函数<code>len</code>,<code>isEmpty</code>,<code>insert</code>,<code>detach</code>,<code>retrieveExpiry</code>和<code>reset</code>，从函数名就可以看出每个函数的作用。当前有两个结构体“实现了”这个interface，分别是<code>loopQueue</code>和<code>workerStack</code>。这两个结构体的区别就是<code>loopQueue</code>可以在初始化<code>pool</code>实例的时候<strong>预分配内存</strong>。所以如果通过<code>NewPool</code>初始化<code>pool</code>实例并且在<code>option</code>中定义了<code>PreAlloc</code>值的话，就会使用<code>loopQueue</code>来实现<code>worker</code>队列。</p>
 <p>​		而如果采用<code>NewPoolWithFunc</code>实例化协程池对象的话，生成的是如下的协程池对象：</p>
 <div class="highlight"><pre style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4"><code class="language-golang" data-lang="golang"><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">PoolWithFunc</span> <span style="color:#66d9ef">struct</span> {
 	<span style="color:#75715e">// capacity of the pool.
